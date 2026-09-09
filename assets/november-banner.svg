@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1080" height="288" viewBox="0 0 1080 288" role="img" aria-labelledby="title description">
   <title id="title">November</title>
-  <desc id="description">November in blue-to-cyan block ASCII lettering on a midnight-blue circuit board. October's hardware agent harness.</desc>
+  <desc id="description">November in blue block lettering. An agentic harness for hardware.</desc>
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
       <stop stop-color="#060e1b"/>

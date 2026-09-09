@@ -4,7 +4,7 @@
 
 <h1>November</h1>
 
-<p><strong>An agent for hardware.</strong></p>
+<p><strong>An agentic harness for hardware</strong></p>
 
 </div>
 
@@ -12,7 +12,7 @@
 
 > Early design. Nothing to install yet.
 
-November is being built to read sensors, control pins, and talk to boards. The idea: use it while building a device, then run it on that device.
+November is being built to give agents tools for reading sensors, controlling pins, and talking to boards. Use the harness while building a device, then run it on that device.
 
 Both use the same code, with stricter permissions on shipped devices.
 
@@ -47,10 +47,10 @@ If a pump runs but its reply gets lost, retrying could run it twice. November mu
 - Check actions outside the model. Allow only named devices and operations. No bypass through a shell, device files, or MQTT credentials.
 - Limit values, duration, frequency, and allowed device states.
 - Save command IDs and outcomes across restarts. Check uncertain results before retrying; don't repeat completed actions.
-- Keep emergency stops and watchdogs in hardware or firmware, independent of the agent.
+- Keep emergency stops and watchdogs in hardware or firmware, independent of the harness.
 - Define what each device does when the network or model is unavailable. Local models are optional; fallback behavior isn't.
 - Log readings, decisions, and results. Limit storage and keep secrets out.
-- Version settings and permissions. Test updates and rollback. The agent cannot change its own permissions.
+- Version settings and permissions. Test updates and rollback. Agents using the harness cannot change their own permissions.
 
 Not ready for unattended or safety-critical use. Each device will need its own safety review and testing.
 

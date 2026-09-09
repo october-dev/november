@@ -1,14 +1,16 @@
-```text
- _   _  ___  __     __ _____  __  __  ____   _____  ____
-| \ | |/ _ \ \ \   / /| ____||  \/  || __ ) | ____||  _ \
-|  \| | | | | \ \ / / |  _|  | |\/| ||  _ \ |  _|  | |_) |
-| |\  | |_| |  \ V /  | |___ | |  | || |_) || |___ |  _ <
-|_| \_|\___/    \_/   |_____||_|  |_||____/ |_____||_| \_\
-```
+<div align="center">
 
-# November
+<img src="assets/november-banner.svg" alt="NOVEMBER — blue ASCII wordmark with connected circuit nodes" width="1080">
 
-**Build the device. Ship the harness.**
+<h1>November</h1>
+
+<p><strong>Build the device. Ship the harness.</strong></p>
+
+Hardware-native agents. From the workbench to the field.
+
+</div>
+
+---
 
 November is October's hardware agent harness, being designed as an open-source foundation for connected devices. It is for engineers building those devices and for the devices themselves: one shared core that works at the bench and runs in the field.
 

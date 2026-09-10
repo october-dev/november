@@ -72,4 +72,10 @@ It should work without an October account and let you choose your model provider
 
 Have a device in mind? Open an issue with the board, connection, what it should do, and what must happen when it fails.
 
-An open-source license is still to be chosen. We'll add it before accepting code contributions.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for contribution, reproduction, and public-data requirements. Report vulnerabilities privately using [SECURITY.md](SECURITY.md), which also describes version support and updates.
+
+## License
+
+Copyright 2026 November contributors.
+
+November is licensed under the [Apache License, Version 2.0](LICENSE). Third-party material retains its own licenses and required notices; see [reuse and attribution](CONTRIBUTING.md#reuse-and-attribution).

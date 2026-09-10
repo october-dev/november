@@ -18,7 +18,9 @@ Both use the same code, with stricter permissions on shipped devices.
 
 ## Hardware
 
-November will run on Linux computers such as Raspberry Pi and Jetson. Smaller boards, including Arduino, ESP32, and STM32, will connect to a host running November.
+November v1 targets Raspberry Pi 4; other boards are possible but untested. Smaller boards, including Arduino, ESP32, and STM32, will connect to a host running November.
+
+See the [support matrix](docs/support-matrix.md) for the reference setup, wiring, and qualification status.
 
 Planned tools: serial, GPIO, I2C/SPI, MQTT, and simulated devices for testing.
 
@@ -61,6 +63,8 @@ One Linux board, a USB-connected microcontroller, a sensor, an LED, and MQTT.
 Test it in simulation, use it from a terminal, then run it as a background service. Disconnect the network, repeat a command, drop a reply, and restart the process.
 
 It must stay within its limits, avoid duplicate actions, and show what happened. More boards and fleet tools come later.
+
+See the [release gates](docs/release-gates.md) for the workload, numeric limits, and required evidence.
 
 ## October
 

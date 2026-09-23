@@ -1,6 +1,6 @@
 # Contributing to November
 
-November is in early design. There is no installable package, runtime test suite, or CI yet; package setup belongs to [#4](https://github.com/october-dev/november/issues/4). Device workflows, failure cases, and documentation improvements are useful now.
+November is in early development. The pnpm workspace, test suite, and CI exist (see the [README development guide](README.md#development) and [#4](https://github.com/october-dev/november/issues/4)), but there is no installable release yet. Device workflows, failure cases, and documentation improvements are useful now.
 
 ## Propose a change
 

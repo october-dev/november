@@ -10,7 +10,7 @@
 
 ---
 
-> Early design. Nothing to install yet.
+> In development. Nothing published to install yet; see [Development](#development) to work from source.
 
 November is being built to give agents tools for reading sensors, controlling pins, and talking to boards. Use the harness while building a device, then run it on that device.
 
@@ -71,6 +71,29 @@ See the [release gates](docs/release-gates.md) for the workload, numeric limits,
 [October Harness](https://github.com/october-dev/october-harness) can provide the coding interface. [October Bus](https://github.com/october-dev/october-bus) can connect agents. Neither is required, and Bus messages cannot grant device permissions.
 
 It should work without an October account and let you choose your model provider.
+
+## Development
+
+Requires Node.js 24 or newer and pnpm 11 (`corepack enable` provides both from the pinned versions).
+
+```bash
+pnpm install   # install pinned dependencies (committed lockfile)
+pnpm build     # typecheck and compile all packages
+pnpm test      # unit and simulator tests; no hardware, network, or model account
+pnpm smoke     # run the built CLI and package entry points
+```
+
+The workspace separates the shared core, the privileged device executor, hardware adapters, and the terminal/service entry points:
+
+| Package | Role |
+| --- | --- |
+| `packages/core` | Shared contracts; no hardware or model dependencies |
+| `packages/executor` | Privileged device execution, outside the model process |
+| `packages/adapters` | Serial, GPIO, I2C, SPI, MQTT adapters and simulated devices |
+| `packages/cli` | Development terminal entry point (`november`) |
+| `packages/service` | Supervised Linux service entry point |
+
+CI runs formatting, type checks, tests, build, and smoke on x64 and arm64 with repository-read permissions only. The v1 plan lives in [issue #1](https://github.com/october-dev/november/issues/1); workspace setup is [#4](https://github.com/october-dev/november/issues/4).
 
 ## Contributing
 

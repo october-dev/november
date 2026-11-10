@@ -8,3 +8,20 @@
  */
 export { ACTION_OUTCOMES, isUncertain } from "./outcomes.js";
 export type { ActionOutcome } from "./outcomes.js";
+export {
+  DEVICE_CONFIG_SCHEMA_VERSION,
+  parseDeviceConfig,
+} from "./device-config.js";
+export type {
+  ConfigError,
+  DeviceConfig,
+  DeviceSpec,
+  GpioTransport,
+  I2cTransport,
+  Operation,
+  OperationValue,
+  ParseResult,
+  SafeState,
+  SpiTransport,
+  Transport,
+} from "./device-config.js";

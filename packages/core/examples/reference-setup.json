@@ -5,7 +5,12 @@
       "id": "host-led",
       "transport": { "type": "gpio", "chip": "gpiochip0", "line": 17 },
       "operations": [
-        { "name": "set", "access": "actuate", "value": { "type": "boolean" } }
+        {
+          "name": "set",
+          "access": "actuate",
+          "value": { "type": "boolean" },
+          "maxActiveMs": "unlimited"
+        }
       ],
       "safeState": { "operation": "set", "value": false }
     },

@@ -2,87 +2,238 @@
  * Versioned device configuration (issue #6, first checkbox).
  *
  * A configuration describes each device once: its ID, how it is wired, the
- * operations it allows with their units and limits, and the safe state of any
+ * operations it allows with their units and limits, and the safe state of its
  * output. `parseDeviceConfig` only inspects data. It never opens, probes or
  * actuates hardware, so it is safe to run before any device is touched.
  *
- * Unknown fields are rejected rather than ignored, so a typo cannot silently
- * drop a limit. Secrets appear only as references (`env:NAME` or
- * `file:/absolute/path`), never as values.
+ * Validation is staged. The schema below checks structure first and reports
+ * every structural problem. Only when the structure is valid do the domain
+ * rules run (safe states, duplicates, shared resources, supported
+ * combinations), and they report every domain problem. A structural error
+ * therefore never produces a domain conclusion, such as a missing actuator,
+ * about an entry that did not parse.
  *
- * Not covered yet, and left to later #6 work: serial/USB identity binding,
- * observation and action types, and adapter lifecycle behavior.
+ * Driver selection: `transport.type` selects the adapter family. A GPIO device
+ * is one line, so it supports only boolean `read` or `actuate` operations; the
+ * domain rules reject numbers and transfers on it. Values are logical: `true`
+ * means asserted, and `activeLow: true` makes asserted a low electrical level.
+ * I2C and SPI operations depend on the attached chip, so those devices will
+ * name their driver in the adapter-contract part of #6, and the adapter must
+ * reject any operation it does not implement before opening hardware.
+ *
+ * Safe state: a device may have at most one `actuate` operation, so its single
+ * `safeState` restores the whole device. Every actuator declares `maxActiveMs`,
+ * either a bounded duration or the explicit exception "unlimited"; an exception
+ * records intent and does not establish that a physical load is safe.
+ * `transfer` operations are not actuations and need no safe state, but bytes
+ * written to a bus device can change its state; use them only for exchanges
+ * whose effect is understood, such as the reference SPI loopback.
+ *
+ * Secrets appear only as references (`env:NAME` or `file:/absolute/path`),
+ * never as values. This parser checks their syntax only: it does not resolve
+ * them, read environment variables or check that a file exists or is
+ * readable. Lookup and path rules belong to the component that consumes them.
+ *
+ * Not covered yet, and left to later #6 work: identity binding for every
+ * resource (serial/USB, MQTT, and GPIO, I2C and SPI devices that can be
+ * renumbered), observation and action types, and adapter lifecycle behavior.
  */
+import { z } from "zod";
 
 export const DEVICE_CONFIG_SCHEMA_VERSION = 1;
 
-export interface GpioTransport {
-  readonly type: "gpio";
+const ID_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
+const GPIO_CHIP_PATTERN = /^gpiochip\d+$/;
+const SECRET_REF_PATTERN = /^(env:[A-Z_][A-Z0-9_]*|file:\/[^\0]+)$/;
+const I2C_MIN_ADDRESS = 0x08;
+const I2C_MAX_ADDRESS = 0x77;
+const MAX_LINE = 65_535;
+const MAX_TRANSFER_BYTES = 4096;
+const MAX_ACTIVE_MS = 86_400_000;
+const MAX_ACTIVE_MESSAGE = `must be an integer number of milliseconds from 1 to ${MAX_ACTIVE_MS}, or "unlimited"`;
+const ID_MESSAGE =
+  "must be lowercase letters, digits or dashes, starting with a letter";
+
+/** Every message says what is wrong; a missing field says so instead. */
+const says = (message: string) => ({
+  error: (issue: { input: unknown }) =>
+    issue.input === undefined ? "is required" : message,
+});
+
+const integer = (min: number, max: number, message?: string) => {
+  const text = message ?? `must be an integer from ${min} to ${max}`;
+  return z
+    .number(says(text))
+    .int(says(text))
+    .min(min, says(text))
+    .max(max, says(text));
+};
+
+const Id = z.string(says(ID_MESSAGE)).regex(ID_PATTERN, says(ID_MESSAGE));
+
+const GpioTransportSchema = z.strictObject({
+  type: z.literal("gpio"),
   /** GPIO character device name, for example `gpiochip0`. */
-  readonly chip: string;
-  readonly line: number;
-  readonly activeLow: boolean;
-  readonly bias: "disabled" | "pull-up" | "pull-down";
-}
+  chip: z
+    .string(says("must be a GPIO chip name like gpiochip0"))
+    .regex(GPIO_CHIP_PATTERN, says("must be a GPIO chip name like gpiochip0")),
+  line: integer(0, MAX_LINE),
+  activeLow: z.boolean(says("must be true or false")).default(false),
+  bias: z
+    .enum(
+      ["disabled", "pull-up", "pull-down"],
+      says('must be one of "disabled", "pull-up", "pull-down"'),
+    )
+    .default("disabled"),
+});
 
-export interface I2cTransport {
-  readonly type: "i2c";
-  readonly bus: number;
-  /** 7-bit address outside the reserved ranges (0x08 to 0x77). */
-  readonly address: number;
-}
+const I2cTransportSchema = z.strictObject({
+  type: z.literal("i2c"),
+  bus: integer(0, MAX_LINE),
+  /** 7-bit address outside the reserved ranges. */
+  address: integer(
+    I2C_MIN_ADDRESS,
+    I2C_MAX_ADDRESS,
+    "must be an integer from 0x08 to 0x77",
+  ),
+});
 
-export interface SpiTransport {
-  readonly type: "spi";
-  readonly bus: number;
-  readonly chipSelect: number;
-  readonly mode: 0 | 1 | 2 | 3;
-  readonly maxSpeedHz: number;
-  readonly bitsPerWord: number;
-}
+const SpiTransportSchema = z.strictObject({
+  type: z.literal("spi"),
+  bus: integer(0, MAX_LINE),
+  chipSelect: integer(0, MAX_LINE),
+  mode: integer(0, 3),
+  maxSpeedHz: integer(1, 1_000_000_000),
+  bitsPerWord: integer(1, 32).default(8),
+});
 
-export type Transport = GpioTransport | I2cTransport | SpiTransport;
+const TransportSchema = z.discriminatedUnion(
+  "type",
+  [GpioTransportSchema, I2cTransportSchema, SpiTransportSchema],
+  says('must be one of "gpio", "i2c", "spi"'),
+);
 
-export type OperationValue =
-  | { readonly type: "boolean" }
-  | {
-      readonly type: "number";
-      readonly unit: string;
-      readonly min: number;
-      readonly max: number;
-    }
-  | { readonly type: "bytes"; readonly maxLength: number };
+const BooleanValue = z.strictObject({ type: z.literal("boolean") });
+const NumberValue = z
+  .strictObject({
+    type: z.literal("number"),
+    unit: z
+      .string(says("must be a unit such as degC or hPa"))
+      .regex(/^\S{1,16}$/, says("must be a unit such as degC or hPa")),
+    min: z.number(says("must be a finite number")),
+    max: z.number(says("must be a finite number")),
+  })
+  .refine((value) => value.min <= value.max, {
+    path: ["max"],
+    error: "must not be less than min",
+  });
+const BytesValue = z.strictObject({
+  type: z.literal("bytes"),
+  maxLength: integer(1, MAX_TRANSFER_BYTES),
+});
 
-/**
- * `read` observes, `actuate` changes a physical output, and `transfer` is a
- * bounded bus exchange (for example the SPI loopback) with no output.
- */
-export interface Operation {
-  readonly name: string;
-  readonly access: "read" | "actuate" | "transfer";
-  readonly value: OperationValue;
-  /** Longest time an `actuate` operation may hold a non-safe value. */
-  readonly maxActiveMs?: number;
-}
+const OperationSchema = z.discriminatedUnion(
+  "access",
+  [
+    z.strictObject({
+      name: Id,
+      access: z.literal("read"),
+      value: z.discriminatedUnion(
+        "type",
+        [BooleanValue, NumberValue, BytesValue],
+        says('must be one of "boolean", "number", "bytes"'),
+      ),
+    }),
+    z.strictObject({
+      name: Id,
+      access: z.literal("actuate"),
+      value: z.discriminatedUnion(
+        "type",
+        [BooleanValue, NumberValue],
+        says("an actuate operation must take a boolean or number"),
+      ),
+      /** Longest time the output may hold a non-safe value, or the explicit exception "unlimited". */
+      maxActiveMs: z.union(
+        [integer(1, MAX_ACTIVE_MS, MAX_ACTIVE_MESSAGE), z.literal("unlimited")],
+        says(MAX_ACTIVE_MESSAGE),
+      ),
+    }),
+    z.strictObject({
+      name: Id,
+      access: z.literal("transfer"),
+      value: z.discriminatedUnion(
+        "type",
+        [BytesValue],
+        says("a transfer operation must take bytes"),
+      ),
+    }),
+  ],
+  says('must be one of "read", "actuate", "transfer"'),
+);
 
-export interface SafeState {
-  readonly operation: string;
-  readonly value: boolean | number;
-}
+const SafeStateSchema = z.strictObject(
+  {
+    operation: Id,
+    value: z.union(
+      [z.boolean(), z.number()],
+      says("must be true, false or a finite number"),
+    ),
+  },
+  says("must be an object"),
+);
 
-export interface DeviceSpec {
-  readonly id: string;
-  readonly transport: Transport;
-  readonly operations: readonly Operation[];
-  readonly safeState?: SafeState;
-}
+const DeviceSchema = z.strictObject(
+  {
+    id: Id,
+    transport: TransportSchema,
+    operations: z
+      .array(OperationSchema, says("must be a non-empty list"))
+      .min(1, says("must be a non-empty list")),
+    safeState: SafeStateSchema.optional(),
+  },
+  says("must be an object"),
+);
 
-export interface DeviceConfig {
-  readonly schemaVersion: typeof DEVICE_CONFIG_SCHEMA_VERSION;
-  readonly devices: readonly DeviceSpec[];
-  /** Named secret references. Values are never stored here. */
-  readonly secrets: Readonly<Record<string, string>>;
-}
+const DeviceConfigSchema = z.strictObject(
+  {
+    schemaVersion: z.literal(
+      DEVICE_CONFIG_SCHEMA_VERSION,
+      says(`must be ${DEVICE_CONFIG_SCHEMA_VERSION}`),
+    ),
+    devices: z.array(DeviceSchema, says("must be a list")),
+    /** Named secret references. Values are never stored here. */
+    secrets: z
+      .record(
+        Id,
+        // Never echo the value: a pasted secret must not end up in logs.
+        z
+          .string(
+            says(
+              "must be a reference like env:NAME or file:/absolute/path, not a secret value",
+            ),
+          )
+          .regex(
+            SECRET_REF_PATTERN,
+            says(
+              "must be a reference like env:NAME or file:/absolute/path, not a secret value",
+            ),
+          ),
+        says("must be an object"),
+      )
+      .default({}),
+  },
+  says("must be an object"),
+);
+
+export type DeviceConfig = z.output<typeof DeviceConfigSchema>;
+export type DeviceSpec = DeviceConfig["devices"][number];
+export type Transport = DeviceSpec["transport"];
+export type GpioTransport = Extract<Transport, { type: "gpio" }>;
+export type I2cTransport = Extract<Transport, { type: "i2c" }>;
+export type SpiTransport = Extract<Transport, { type: "spi" }>;
+export type Operation = DeviceSpec["operations"][number];
+export type OperationValue = Operation["value"];
+export type SafeState = NonNullable<DeviceSpec["safeState"]>;
 
 export interface ConfigError {
   /** Location of the problem, for example `devices[1].transport.address`. */
@@ -94,369 +245,23 @@ export type ParseResult =
   | { readonly ok: true; readonly config: DeviceConfig }
   | { readonly ok: false; readonly errors: readonly ConfigError[] };
 
-const ID_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
-const GPIO_CHIP_PATTERN = /^gpiochip\d+$/;
-const SECRET_REF_PATTERN = /^(env:[A-Z_][A-Z0-9_]*|file:\/[^\0]+)$/;
-const I2C_MIN_ADDRESS = 0x08;
-const I2C_MAX_ADDRESS = 0x77;
-const MAX_LINE = 65_535;
-const MAX_TRANSFER_BYTES = 4096;
-const MAX_ACTIVE_MS = 86_400_000;
-
-const TRANSPORT_FIELDS = {
-  gpio: ["type", "chip", "line", "activeLow", "bias"],
-  i2c: ["type", "bus", "address"],
-  spi: ["type", "bus", "chipSelect", "mode", "maxSpeedHz", "bitsPerWord"],
-} as const;
-
-const VALUE_FIELDS = {
-  boolean: ["type"],
-  number: ["type", "unit", "min", "max"],
-  bytes: ["type", "maxLength"],
-} as const;
-
-type Obj = Record<string, unknown>;
-
-class Checker {
-  readonly errors: ConfigError[] = [];
-
-  fail(path: string, message: string): undefined {
-    this.errors.push({ path, message });
-    return undefined;
-  }
-
-  record(value: unknown, path: string): Obj | undefined {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      return this.fail(path, "must be an object");
-    }
-    return value as Obj;
-  }
-
-  onlyKeys(value: Obj, path: string, allowed: readonly string[]): void {
-    for (const key of Object.keys(value)) {
-      if (!allowed.includes(key))
-        this.fail(join(path, key), "is not a known field");
-    }
-  }
-
-  object(
-    value: unknown,
-    path: string,
-    allowed: readonly string[],
-  ): Obj | undefined {
-    const o = this.record(value, path);
-    if (o) this.onlyKeys(o, path, allowed);
-    return o;
-  }
-
-  int(
-    value: unknown,
-    path: string,
-    min: number,
-    max: number,
-  ): number | undefined {
-    if (typeof value !== "number" || !Number.isInteger(value)) {
-      return this.fail(path, "must be an integer");
-    }
-    if (value < min || value > max) {
-      return this.fail(path, `must be between ${min} and ${max}`);
-    }
-    return value;
-  }
-
-  finite(value: unknown, path: string): number | undefined {
-    if (typeof value !== "number" || !Number.isFinite(value)) {
-      return this.fail(path, "must be a finite number");
-    }
-    return value;
-  }
-
-  string(
-    value: unknown,
-    path: string,
-    pattern: RegExp,
-    hint: string,
-  ): string | undefined {
-    if (typeof value !== "string" || !pattern.test(value))
-      return this.fail(path, hint);
-    return value;
-  }
-
-  oneOf<T extends string | number>(
-    value: unknown,
-    path: string,
-    options: readonly T[],
-  ): T | undefined {
-    if (!options.includes(value as T)) {
-      return this.fail(
-        path,
-        `must be one of ${options.map((o) => JSON.stringify(o)).join(", ")}`,
-      );
-    }
-    return value as T;
-  }
-
-  bool(value: unknown, path: string, fallback: boolean): boolean | undefined {
-    if (value === undefined) return fallback;
-    if (typeof value !== "boolean")
-      return this.fail(path, "must be true or false");
-    return value;
-  }
+function pathText(path: readonly PropertyKey[]): string {
+  return path.reduce<string>((text, key) => {
+    if (typeof key === "number") return `${text}[${key}]`;
+    return text ? `${text}.${String(key)}` : String(key);
+  }, "");
 }
 
-function join(path: string, key: string): string {
-  return path ? `${path}.${key}` : key;
-}
-
-function transport(
-  c: Checker,
-  value: unknown,
-  path: string,
-): Transport | undefined {
-  const t = c.record(value, path);
-  if (!t) return undefined;
-  const type = c.oneOf(t.type, join(path, "type"), [
-    "gpio",
-    "i2c",
-    "spi",
-  ] as const);
-  if (!type) return undefined;
-  c.onlyKeys(t, path, TRANSPORT_FIELDS[type]);
-  if (type === "gpio") {
-    const chip = c.string(
-      t.chip,
-      join(path, "chip"),
-      GPIO_CHIP_PATTERN,
-      "must be a GPIO chip name like gpiochip0",
-    );
-    const line = c.int(t.line, join(path, "line"), 0, MAX_LINE);
-    const activeLow = c.bool(t.activeLow, join(path, "activeLow"), false);
-    const bias =
-      t.bias === undefined
-        ? "disabled"
-        : c.oneOf(t.bias, join(path, "bias"), [
-            "disabled",
-            "pull-up",
-            "pull-down",
-          ] as const);
-    if (
-      chip === undefined ||
-      line === undefined ||
-      activeLow === undefined ||
-      bias === undefined
-    )
-      return undefined;
-    return { type, chip, line, activeLow, bias };
-  }
-  if (type === "i2c") {
-    const bus = c.int(t.bus, join(path, "bus"), 0, MAX_LINE);
-    const address = c.int(
-      t.address,
-      join(path, "address"),
-      I2C_MIN_ADDRESS,
-      I2C_MAX_ADDRESS,
-    );
-    if (bus === undefined || address === undefined) return undefined;
-    return { type, bus, address };
-  }
-  const bus = c.int(t.bus, join(path, "bus"), 0, MAX_LINE);
-  const chipSelect = c.int(t.chipSelect, join(path, "chipSelect"), 0, MAX_LINE);
-  const mode = c.oneOf(t.mode, join(path, "mode"), [0, 1, 2, 3] as const);
-  const maxSpeedHz = c.int(
-    t.maxSpeedHz,
-    join(path, "maxSpeedHz"),
-    1,
-    1_000_000_000,
+/** One error per problem; an unknown-key issue lists keys, so it becomes one error per field. */
+function structuralErrors(issues: readonly z.core.$ZodIssue[]): ConfigError[] {
+  return issues.flatMap((issue) =>
+    issue.code === "unrecognized_keys"
+      ? issue.keys.map((key) => ({
+          path: pathText([...issue.path, key]),
+          message: "is not a known field",
+        }))
+      : [{ path: pathText(issue.path), message: issue.message }],
   );
-  const bitsPerWord =
-    t.bitsPerWord === undefined
-      ? 8
-      : c.int(t.bitsPerWord, join(path, "bitsPerWord"), 1, 32);
-  if (
-    bus === undefined ||
-    chipSelect === undefined ||
-    mode === undefined ||
-    maxSpeedHz === undefined ||
-    bitsPerWord === undefined
-  )
-    return undefined;
-  return { type, bus, chipSelect, mode, maxSpeedHz, bitsPerWord };
-}
-
-function operationValue(
-  c: Checker,
-  value: unknown,
-  path: string,
-): OperationValue | undefined {
-  const head = c.record(value, path);
-  if (!head) return undefined;
-  const type = c.oneOf(head.type, join(path, "type"), [
-    "boolean",
-    "number",
-    "bytes",
-  ] as const);
-  if (!type) return undefined;
-  c.onlyKeys(head, path, VALUE_FIELDS[type]);
-  if (type === "boolean") return { type };
-  if (type === "bytes") {
-    const maxLength = c.int(
-      head.maxLength,
-      join(path, "maxLength"),
-      1,
-      MAX_TRANSFER_BYTES,
-    );
-    return maxLength === undefined ? undefined : { type, maxLength };
-  }
-  const unit = c.string(
-    head.unit,
-    join(path, "unit"),
-    /^\S{1,16}$/,
-    "must be a unit such as degC or hPa",
-  );
-  const min = c.finite(head.min, join(path, "min"));
-  const max = c.finite(head.max, join(path, "max"));
-  if (min !== undefined && max !== undefined && min > max)
-    return c.fail(join(path, "max"), "must not be less than min");
-  if (unit === undefined || min === undefined || max === undefined)
-    return undefined;
-  return { type, unit, min, max };
-}
-
-function operation(
-  c: Checker,
-  value: unknown,
-  path: string,
-): Operation | undefined {
-  const o = c.object(value, path, ["name", "access", "value", "maxActiveMs"]);
-  if (!o) return undefined;
-  const name = c.string(
-    o.name,
-    join(path, "name"),
-    ID_PATTERN,
-    "must be lowercase letters, digits or dashes, starting with a letter",
-  );
-  const access = c.oneOf(o.access, join(path, "access"), [
-    "read",
-    "actuate",
-    "transfer",
-  ] as const);
-  const v = operationValue(c, o.value, join(path, "value"));
-  if (access === "actuate" && v?.type === "bytes") {
-    c.fail(
-      join(path, "value.type"),
-      "an actuate operation must take a boolean or number",
-    );
-  }
-  if (access === "transfer" && v !== undefined && v.type !== "bytes") {
-    c.fail(join(path, "value.type"), "a transfer operation must take bytes");
-  }
-  let maxActiveMs: number | undefined;
-  if (o.maxActiveMs !== undefined) {
-    if (access !== "actuate")
-      c.fail(join(path, "maxActiveMs"), "applies only to actuate operations");
-    maxActiveMs = c.int(
-      o.maxActiveMs,
-      join(path, "maxActiveMs"),
-      1,
-      MAX_ACTIVE_MS,
-    );
-  }
-  if (name === undefined || access === undefined || v === undefined)
-    return undefined;
-  return maxActiveMs === undefined
-    ? { name, access, value: v }
-    : { name, access, value: v, maxActiveMs };
-}
-
-function safeState(
-  c: Checker,
-  value: unknown,
-  path: string,
-  operations: readonly Operation[],
-): SafeState | undefined {
-  const s = c.object(value, path, ["operation", "value"]);
-  if (!s) return undefined;
-  const op = operations.find((o) => o.name === s.operation);
-  if (!op || op.access !== "actuate") {
-    return c.fail(
-      join(path, "operation"),
-      "must name one of this device's actuate operations",
-    );
-  }
-  if (op.value.type === "boolean") {
-    return typeof s.value === "boolean"
-      ? { operation: op.name, value: s.value }
-      : c.fail(join(path, "value"), "must be true or false");
-  }
-  if (op.value.type === "number") {
-    const n = c.finite(s.value, join(path, "value"));
-    if (n === undefined) return undefined;
-    if (n < op.value.min || n > op.value.max)
-      return c.fail(
-        join(path, "value"),
-        "must be within the operation's min and max",
-      );
-    return { operation: op.name, value: n };
-  }
-  return undefined;
-}
-
-function device(
-  c: Checker,
-  value: unknown,
-  path: string,
-): DeviceSpec | undefined {
-  const d = c.object(value, path, [
-    "id",
-    "transport",
-    "operations",
-    "safeState",
-  ]);
-  if (!d) return undefined;
-  const id = c.string(
-    d.id,
-    join(path, "id"),
-    ID_PATTERN,
-    "must be lowercase letters, digits or dashes, starting with a letter",
-  );
-  const t = transport(c, d.transport, join(path, "transport"));
-  const operations: Operation[] = [];
-  if (!Array.isArray(d.operations) || d.operations.length === 0) {
-    c.fail(join(path, "operations"), "must be a non-empty list");
-  } else {
-    const names = new Set<string>();
-    d.operations.forEach((raw, i) => {
-      const op = operation(c, raw, `${join(path, "operations")}[${i}]`);
-      if (!op) return;
-      if (names.has(op.name))
-        c.fail(
-          `${join(path, "operations")}[${i}].name`,
-          `duplicates operation "${op.name}"`,
-        );
-      names.add(op.name);
-      operations.push(op);
-    });
-  }
-  const actuates = operations.some((o) => o.access === "actuate");
-  let safe: SafeState | undefined;
-  if (d.safeState === undefined) {
-    if (actuates)
-      c.fail(
-        join(path, "safeState"),
-        "is required for a device with an actuate operation",
-      );
-  } else if (!actuates) {
-    c.fail(
-      join(path, "safeState"),
-      "applies only to devices with an actuate operation",
-    );
-  } else {
-    safe = safeState(c, d.safeState, join(path, "safeState"), operations);
-  }
-  if (id === undefined || t === undefined) return undefined;
-  return safe === undefined
-    ? { id, transport: t, operations }
-    : { id, transport: t, operations, safeState: safe };
 }
 
 /** One physical resource per device: two IDs must not share a line, address or chip select. */
@@ -467,64 +272,121 @@ function resourceKey(t: Transport): string {
   return `spi bus ${t.bus} chip select ${t.chipSelect}`;
 }
 
-/**
- * Validates untrusted configuration data, such as parsed JSON, and returns a
- * new, fully defaulted configuration or every problem found. It performs no
- * I/O and touches no hardware.
- */
-export function parseDeviceConfig(input: unknown): ParseResult {
-  const c = new Checker();
-  const root = c.object(input, "", ["schemaVersion", "devices", "secrets"]);
-  if (!root) return { ok: false, errors: c.errors };
-  if (root.schemaVersion !== DEVICE_CONFIG_SCHEMA_VERSION) {
-    c.fail("schemaVersion", `must be ${DEVICE_CONFIG_SCHEMA_VERSION}`);
+function safeStateErrors(device: DeviceSpec, path: string): ConfigError[] {
+  const actuator = device.operations.find((op) => op.access === "actuate");
+  if (!device.safeState) {
+    return actuator
+      ? [
+          {
+            path: `${path}.safeState`,
+            message: "is required for a device with an actuate operation",
+          },
+        ]
+      : [];
   }
-  const devices: DeviceSpec[] = [];
-  if (!Array.isArray(root.devices)) {
-    c.fail("devices", "must be a list");
-  } else {
-    const ids = new Map<string, number>();
-    const resources = new Map<string, string>();
-    root.devices.forEach((raw, i) => {
-      const d = device(c, raw, `devices[${i}]`);
-      if (!d) return;
-      if (ids.has(d.id))
-        c.fail(`devices[${i}].id`, `duplicates devices[${ids.get(d.id)}]`);
-      ids.set(d.id, i);
-      const key = resourceKey(d.transport);
-      const owner = resources.get(key);
-      if (owner !== undefined)
-        c.fail(
-          `devices[${i}].transport`,
-          `${key} is already used by "${owner}"`,
-        );
-      resources.set(key, d.id);
-      devices.push(d);
-    });
+  if (!actuator) {
+    return [
+      {
+        path: `${path}.safeState`,
+        message: "applies only to devices with an actuate operation",
+      },
+    ];
   }
-  const secrets: Record<string, string> = {};
-  if (root.secrets !== undefined) {
-    const s = c.record(root.secrets, "secrets");
-    for (const [name, ref] of Object.entries(s ?? {})) {
-      const n = c.string(
-        name,
-        `secrets.${name}`,
-        ID_PATTERN,
-        "must be lowercase letters, digits or dashes, starting with a letter",
-      );
-      // Never echo the value: a pasted secret must not end up in logs.
-      const r = c.string(
-        ref,
-        `secrets.${name}`,
-        SECRET_REF_PATTERN,
-        "must be a reference like env:NAME or file:/absolute/path, not a secret value",
-      );
-      if (n !== undefined && r !== undefined) secrets[n] = r;
+  if (device.safeState.operation !== actuator.name) {
+    return [
+      {
+        path: `${path}.safeState.operation`,
+        message: "must name this device's actuate operation",
+      },
+    ];
+  }
+  const value = device.safeState.value;
+  if (actuator.value.type === "boolean" && typeof value !== "boolean") {
+    return [
+      { path: `${path}.safeState.value`, message: "must be true or false" },
+    ];
+  }
+  if (actuator.value.type === "number") {
+    if (typeof value !== "number") {
+      return [
+        { path: `${path}.safeState.value`, message: "must be a finite number" },
+      ];
+    }
+    if (value < actuator.value.min || value > actuator.value.max) {
+      return [
+        {
+          path: `${path}.safeState.value`,
+          message: "must be within the operation's min and max",
+        },
+      ];
     }
   }
-  if (c.errors.length > 0) return { ok: false, errors: c.errors };
-  return {
-    ok: true,
-    config: { schemaVersion: DEVICE_CONFIG_SCHEMA_VERSION, devices, secrets },
-  };
+  return [];
+}
+
+/** Rules that need a structurally valid configuration; each problem is reported. */
+function domainErrors(config: DeviceConfig): ConfigError[] {
+  const errors: ConfigError[] = [];
+  const ids = new Map<string, number>();
+  const resources = new Map<string, string>();
+  config.devices.forEach((device, i) => {
+    const path = `devices[${i}]`;
+    const first = ids.get(device.id);
+    if (first !== undefined)
+      errors.push({
+        path: `${path}.id`,
+        message: `duplicates devices[${first}]`,
+      });
+    else ids.set(device.id, i);
+
+    const key = resourceKey(device.transport);
+    const owner = resources.get(key);
+    if (owner !== undefined)
+      errors.push({
+        path: `${path}.transport`,
+        message: `${key} is already used by "${owner}"`,
+      });
+    else resources.set(key, device.id);
+
+    const names = new Set<string>();
+    let actuators = 0;
+    device.operations.forEach((op, j) => {
+      const opPath = `${path}.operations[${j}]`;
+      if (names.has(op.name))
+        errors.push({
+          path: `${opPath}.name`,
+          message: `duplicates operation "${op.name}"`,
+        });
+      names.add(op.name);
+      if (op.access === "actuate") actuators++;
+      if (device.transport.type === "gpio" && op.value.type !== "boolean")
+        errors.push({
+          path: `${opPath}.value.type`,
+          message: "a GPIO line supports only boolean values",
+        });
+    });
+    if (actuators > 1)
+      errors.push({
+        path: `${path}.operations`,
+        message:
+          "may contain at most one actuate operation, so one safe state restores the device",
+      });
+    else errors.push(...safeStateErrors(device, path));
+  });
+  return errors;
+}
+
+/**
+ * Validates untrusted configuration data, such as parsed JSON, and returns a
+ * new, fully defaulted configuration, or the problems found. Structural
+ * problems are all reported first; domain problems are reported only for a
+ * structurally valid configuration. It performs no I/O and touches no hardware.
+ */
+export function parseDeviceConfig(input: unknown): ParseResult {
+  const parsed = DeviceConfigSchema.safeParse(input);
+  if (!parsed.success)
+    return { ok: false, errors: structuralErrors(parsed.error.issues) };
+  const errors = domainErrors(parsed.data);
+  if (errors.length > 0) return { ok: false, errors };
+  return { ok: true, config: parsed.data };
 }

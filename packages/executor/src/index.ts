@@ -28,7 +28,11 @@ export const UNIMPLEMENTED_OUTCOME: ActionOutcome = "rejected";
 export { JournalError, openJournal } from "./journal.js";
 export type {
   ActionJournal,
+  CrashPoint,
+  EffectOutcome,
   JournalCommand,
+  JournalEffect,
+  JournalRecordView,
   JournalResult,
 } from "./journal.js";
 

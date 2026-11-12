@@ -31,7 +31,9 @@ describe("simulated adapter", () => {
       replaced: { ...configured, key: "gpio:replaced" },
       deviceId: "host-led",
       readOperation: "level",
+      foreignDeviceId: "other-led",
       actuate,
+      actuateFresh: { ...actuate, commandId: "cmd-fresh" },
       unsupported: { ...actuate, commandId: "cmd-blink", operation: "blink" },
       nowMs: 5_000,
       actuationCount: () => adapter.actuationCount,
@@ -50,7 +52,14 @@ describe("simulated adapter", () => {
 
     adapter.replug("host-led", "gpiochip0/99");
     const opened = await adapter.open(configured);
-    expect(opened).toEqual({ ok: true });
+    expect(opened).toEqual({
+      ok: true,
+      identity: {
+        kind: "gpio",
+        key: "gpio:gpiochip0:17",
+        path: "gpiochip0/99",
+      },
+    });
     expect(adapter.actuationCount).toBe(before);
 
     const replaced = createSimulatedAdapter();
@@ -62,7 +71,7 @@ describe("simulated adapter", () => {
     expect(replaced.actuationCount).toBe(0);
   });
 
-  it("reports an uncertain command without repeating it", async () => {
+  it("echoes stored outcomes without repeating the command", async () => {
     const adapter = createSimulatedAdapter();
     expect((await adapter.open(configured)).ok).toBe(true);
     const first = await adapter.execute(

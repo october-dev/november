@@ -6,6 +6,7 @@
 import type { DeviceAdapter } from "./adapter.js";
 import type { DeviceAction } from "./action.js";
 import type { ResourceIdentity } from "./identity.js";
+import { parseObservation } from "./observation.js";
 
 export interface AdapterContractInput {
   readonly adapter: DeviceAdapter;
@@ -16,7 +17,11 @@ export interface AdapterContractInput {
   readonly replaced: ResourceIdentity;
   readonly deviceId: string;
   readonly readOperation: string;
+  /** A device id the open adapter must refuse to serve. */
+  readonly foreignDeviceId: string;
   readonly actuate: DeviceAction;
+  /** Same device and operation as `actuate`, with a fresh command id. */
+  readonly actuateFresh: DeviceAction;
   readonly unsupported: DeviceAction;
   readonly nowMs: number;
   readonly actuationCount: () => number;
@@ -65,16 +70,26 @@ export async function checkAdapterContract(
   ) {
     fail("read returned a different source");
   }
-  if (
-    !Number.isInteger(reading.timestampMs) ||
-    !Number.isInteger(reading.freshnessMs)
-  ) {
-    fail("read omitted timestamp or freshness");
-  }
-  if (!["valid", "stale", "invalid", "missing"].includes(reading.validity)) {
-    fail("read omitted validity");
+  const parsed = parseObservation(reading);
+  if (!parsed.ok) {
+    fail(
+      `read returned an observation the parser rejects: ${parsed.errors
+        .map((error) => `${error.path} ${error.message}`)
+        .join("; ")}`,
+    );
   }
   if (input.actuationCount() !== beforeReject) fail("read actuated the device");
+
+  const foreignRead = await input.adapter.read(
+    input.foreignDeviceId,
+    input.readOperation,
+    input.nowMs,
+  );
+  if (foreignRead.validity === "valid") {
+    fail("read reported foreign data as valid");
+  }
+  if (input.actuationCount() !== beforeReject)
+    fail("foreign read actuated the device");
 
   const unsupported = await input.adapter.execute(
     input.unsupported,
@@ -89,12 +104,27 @@ export async function checkAdapterContract(
   if (input.actuationCount() !== beforeReject)
     fail("unsupported operation actuated the device");
 
+  const foreignExecute = await input.adapter.execute(
+    {
+      ...input.actuate,
+      deviceId: input.foreignDeviceId,
+      commandId: "cmd-foreign-device",
+    },
+    input.nowMs,
+  );
+  if (foreignExecute.outcome !== "rejected") {
+    fail("execute admitted a foreign device");
+  }
+  if (input.actuationCount() !== beforeReject)
+    fail("foreign execute actuated the device");
+
   const executed = await input.adapter.execute(input.actuate, input.nowMs);
   if (executed.commandId !== input.actuate.commandId)
     fail("execute did not echo the command id");
   if (
     executed.outcome !== "confirmed" &&
     executed.outcome !== "rejected" &&
+    executed.outcome !== "failed" &&
     executed.outcome !== "unknown"
   ) {
     fail(`execute returned an unexpected outcome ${executed.outcome}`);
@@ -103,13 +133,23 @@ export async function checkAdapterContract(
   if (executed.outcome === "confirmed" && afterExecute <= beforeReject) {
     fail("confirmed execute did not record an actuation");
   }
-  if (executed.outcome !== "confirmed" && afterExecute !== beforeReject) {
-    fail("a non-confirmed execute changed the actuation count");
+  if (executed.outcome === "rejected" && afterExecute !== beforeReject) {
+    fail("a rejected execute changed the actuation count");
+  }
+  if (executed.outcome === "failed" && afterExecute !== beforeReject) {
+    fail("an evidenced failure changed the actuation count");
   }
 
   const again = await input.adapter.reconcile(input.actuate.commandId);
-  if (again.outcome !== executed.outcome) {
-    fail("reconcile changed the outcome of a known command");
+  if (again.commandId !== input.actuate.commandId)
+    fail("reconcile did not echo the command id");
+  const latest = again.outcome;
+  if (executed.outcome === "unknown") {
+    if (latest !== "unknown" && latest !== "confirmed" && latest !== "failed") {
+      fail(`reconcile of an uncertain command returned ${latest}`);
+    }
+  } else if (latest !== executed.outcome) {
+    fail("reconcile changed a decided outcome");
   }
   if (input.actuationCount() !== afterExecute)
     fail("reconcile actuated the device");
@@ -117,23 +157,38 @@ export async function checkAdapterContract(
   const missing = await input.adapter.reconcile("missing-command");
   if (missing.outcome !== "unknown")
     fail(`unknown command reconciled as ${missing.outcome}`);
+  if (missing.commandId !== "missing-command")
+    fail("reconcile did not echo the unknown command id");
   if (input.actuationCount() !== afterExecute)
     fail("reconcile of an unknown command actuated the device");
 
   const repeated = await input.adapter.execute(input.actuate, input.nowMs);
-  if (repeated.outcome !== executed.outcome)
-    fail("repeating a command id changed its outcome");
+  if (repeated.commandId !== input.actuate.commandId)
+    fail("repeated command did not echo the command id");
+  if (repeated.outcome !== latest)
+    fail(
+      "repeating a command id disagrees with the latest established outcome",
+    );
   if (input.actuationCount() !== afterExecute)
     fail("repeating a command id actuated again");
 
   await input.adapter.close();
   const health = input.adapter.health();
   if (health.state !== "closed") fail(`health after close was ${health.state}`);
-  const afterClose = await input.adapter.execute(input.actuate, input.nowMs);
-  if (afterClose.outcome === "confirmed")
-    fail("execute after close was confirmed");
+  const completed = await input.adapter.execute(input.actuate, input.nowMs);
+  if (completed.commandId !== input.actuate.commandId)
+    fail("completed command after close did not echo the command id");
+  if (completed.outcome !== latest)
+    fail("close changed a completed command's outcome");
   if (input.actuationCount() !== afterExecute)
-    fail("execute after close actuated the device");
+    fail("completed command after close actuated the device");
+  const fresh = await input.adapter.execute(input.actuateFresh, input.nowMs);
+  if (fresh.outcome !== "rejected")
+    fail("execute after close accepted new work");
+  if (fresh.commandId !== input.actuateFresh.commandId)
+    fail("fresh command after close did not echo the command id");
+  if (input.actuationCount() !== afterExecute)
+    fail("fresh command after close actuated the device");
   const discoveredAgain = await input.adapter.discover();
   if (discoveredAgain.length === 0)
     fail("discover after close returned nothing");

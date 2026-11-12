@@ -1,100 +1,66 @@
 /**
  * One requested device action.
  *
+ * `commandId` names this request: lowercase letters, digits, or dashes,
+ * starting with a letter, 1-63 characters. The journal (#10) owns
+ * deduplication and retention for command ids; adapters must not
+ * re-apply an id they already recorded.
+ *
  * `deadlineMs` is a duration from admission, not a wall-clock instant, so a
  * clock change cannot extend it. `expectedState` is the state the command
  * claims it will leave behind. Parsing an action does not execute it.
+ *
+ * Payloads are intentionally scalar-or-null here, while configured
+ * operations may also describe byte transfers: byte results enter the
+ * system as observations, and an adapter-specific encoding carries them
+ * on the wire.
  */
+import { z } from "zod";
 import {
-  checkName,
-  isRecord,
-  unknownFieldErrors,
-  type FieldError,
-  type ParseResult,
+  Id,
+  integer,
+  parseWith,
+  says,
+  type ContractParseResult,
 } from "./fields.js";
 
-const COMMAND_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
+const PAYLOAD_MESSAGE =
+  "must be a boolean, a finite number, a string of at most 1024 characters, or null";
 
-export interface DeviceAction {
-  readonly commandId: string;
-  readonly deviceId: string;
-  readonly operation: string;
-  readonly payload: boolean | number | string | null;
-  readonly deadlineMs: number;
-  readonly expectedState: boolean | number | string | null;
-}
+const Payload = z.union(
+  [
+    z.boolean(),
+    z.number().refine(Number.isFinite),
+    z.string().max(1024),
+    z.null(),
+  ],
+  says(PAYLOAD_MESSAGE),
+);
 
-export function parseDeviceAction(input: unknown): ParseResult<DeviceAction> {
+const DeviceActionSchema = z.strictObject({
+  commandId: Id,
+  deviceId: Id,
+  operation: Id,
+  payload: Payload,
+  deadlineMs: integer(
+    1,
+    86_400_000,
+    "must be an integer number of milliseconds from 1 to 86400000",
+  ),
+  expectedState: Payload,
+});
+
+export type DeviceAction = z.output<typeof DeviceActionSchema>;
+
+export function parseDeviceAction(
+  input: unknown,
+): ContractParseResult<DeviceAction> {
   if (!isRecord(input)) {
     return { ok: false, errors: [{ path: "", message: "must be an object" }] };
   }
-  const errors: FieldError[] = unknownFieldErrors(
-    input,
-    [
-      "commandId",
-      "deviceId",
-      "operation",
-      "payload",
-      "deadlineMs",
-      "expectedState",
-    ],
-    "",
-  );
-  if (
-    typeof input.commandId !== "string" ||
-    !COMMAND_PATTERN.test(input.commandId)
-  ) {
-    errors.push({
-      path: "commandId",
-      message:
-        "must be lowercase letters, digits or dashes, starting with a letter",
-    });
-  }
-  const deviceId = checkName(input.deviceId, "deviceId");
-  const operation = checkName(input.operation, "operation");
-  if (deviceId) errors.push(deviceId);
-  if (operation) errors.push(operation);
-  if (!isPayload(input.payload)) {
-    errors.push({
-      path: "payload",
-      message:
-        "must be a boolean, a finite number, a string of at most 1024 characters, or null",
-    });
-  }
-  if (!isPayload(input.expectedState)) {
-    errors.push({
-      path: "expectedState",
-      message:
-        "must be a boolean, a finite number, a string of at most 1024 characters, or null",
-    });
-  }
-  if (
-    typeof input.deadlineMs !== "number" ||
-    !Number.isInteger(input.deadlineMs) ||
-    input.deadlineMs < 1 ||
-    input.deadlineMs > 86_400_000
-  ) {
-    errors.push({
-      path: "deadlineMs",
-      message: "must be an integer number of milliseconds from 1 to 86400000",
-    });
-  }
-  if (errors.length > 0) return { ok: false, errors };
-  return {
-    ok: true,
-    value: {
-      commandId: input.commandId as string,
-      deviceId: input.deviceId as string,
-      operation: input.operation as string,
-      payload: input.payload as DeviceAction["payload"],
-      deadlineMs: input.deadlineMs as number,
-      expectedState: input.expectedState as DeviceAction["expectedState"],
-    },
-  };
+  return parseWith(DeviceActionSchema, input);
 }
 
-function isPayload(value: unknown): value is DeviceAction["payload"] {
-  if (typeof value === "boolean" || value === null) return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  return typeof value === "string" && value.length <= 1024;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

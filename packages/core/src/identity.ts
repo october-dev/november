@@ -6,12 +6,8 @@
  * different key is a different device and must not keep the old permission.
  * Parsing and binding only compare strings. They do not open the resource.
  */
-import {
-  isRecord,
-  unknownFieldErrors,
-  type FieldError,
-  type ParseResult,
-} from "./fields.js";
+import { z } from "zod";
+import { parseWith, says, type ContractParseResult } from "./fields.js";
 
 export const TRANSPORT_KINDS = [
   "gpio",
@@ -25,55 +21,34 @@ export type TransportKind = (typeof TRANSPORT_KINDS)[number];
 
 const KEY_PATTERN = /^[A-Za-z0-9:._+/-]{1,200}$/;
 
-export interface ResourceIdentity {
-  readonly kind: TransportKind;
-  /** Stable name for this resource. Not a volatile device path. */
-  readonly key: string;
-  /** Current location, if one is known. Rebinding may replace it. */
-  readonly path?: string;
-}
+const ResourceIdentitySchema = z.strictObject({
+  kind: z.enum(
+    TRANSPORT_KINDS,
+    says('must be one of "gpio", "i2c", "spi", "serial", "mqtt"'),
+  ),
+  key: z
+    .string(says("must be a stable identity token without spaces"))
+    .regex(KEY_PATTERN, says("must be a stable identity token without spaces")),
+  path: z
+    .string(says("must be a device path without parent-directory segments"))
+    .min(1, says("must be a device path without parent-directory segments"))
+    .max(256, says("must be a device path without parent-directory segments"))
+    .refine(
+      (path) => !path.includes("\0") && !path.split(/[\\/]/).includes(".."),
+      { error: "must be a device path without parent-directory segments" },
+    )
+    .optional(),
+});
+
+export type ResourceIdentity = z.output<typeof ResourceIdentitySchema>;
 
 export function parseResourceIdentity(
   input: unknown,
-): ParseResult<ResourceIdentity> {
+): ContractParseResult<ResourceIdentity> {
   if (!isRecord(input)) {
     return { ok: false, errors: [{ path: "", message: "must be an object" }] };
   }
-  const errors: FieldError[] = unknownFieldErrors(
-    input,
-    ["kind", "key", "path"],
-    "",
-  );
-  if (
-    typeof input.kind !== "string" ||
-    !(TRANSPORT_KINDS as readonly string[]).includes(input.kind)
-  ) {
-    errors.push({
-      path: "kind",
-      message: 'must be one of "gpio", "i2c", "spi", "serial", "mqtt"',
-    });
-  }
-  if (typeof input.key !== "string" || !KEY_PATTERN.test(input.key)) {
-    errors.push({
-      path: "key",
-      message: "must be a stable identity token without spaces",
-    });
-  }
-  if (input.path !== undefined && !isSafePath(input.path)) {
-    errors.push({
-      path: "path",
-      message: "must be a device path without parent-directory segments",
-    });
-  }
-  if (errors.length > 0) return { ok: false, errors };
-  return {
-    ok: true,
-    value: {
-      kind: input.kind as TransportKind,
-      key: input.key as string,
-      ...(typeof input.path === "string" ? { path: input.path } : {}),
-    },
-  };
+  return parseWith(ResourceIdentitySchema, input);
 }
 
 export type BindResult =
@@ -112,9 +87,6 @@ export function bindResource(
   };
 }
 
-function isSafePath(value: unknown): value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 256)
-    return false;
-  if (value.includes("\0")) return false;
-  return !value.split(/[\\/]/).includes("..");
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

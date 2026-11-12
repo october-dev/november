@@ -103,7 +103,7 @@ export function createSimulatedAdapter(): SimulatedAdapter {
       if (!bound.ok) return bound;
       device.identity = bound.identity;
       openDevice = device;
-      return { ok: true };
+      return { ok: true, identity: bound.identity };
     },
     async read(deviceId, operation, nowMs) {
       const device = openDevice?.deviceId === deviceId ? openDevice : undefined;
@@ -113,9 +113,9 @@ export function createSimulatedAdapter(): SimulatedAdapter {
       return observation(deviceId, operation, nowMs, device.level, "valid");
     },
     async execute(action, _nowMs) {
-      if (!openDevice) return closedOutcome(action.commandId);
       const prior = outcomes.get(action.commandId);
       if (prior) return prior;
+      if (!openDevice) return closedOutcome(action.commandId);
       if (
         openDevice.deviceId !== action.deviceId ||
         openDevice.actuateOperation !== action.operation

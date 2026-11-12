@@ -8,7 +8,8 @@
  */
 export { ACTION_OUTCOMES, isUncertain } from "./outcomes.js";
 export type { ActionOutcome } from "./outcomes.js";
-export type { FieldError, ParseResult } from "./fields.js";
+export { NAME_PATTERN, UNIT_PATTERN } from "./fields.js";
+export type { ContractParseResult, FieldError } from "./fields.js";
 export {
   DEFAULT_FRESHNESS_MS,
   OBSERVATION_VALIDITY,
@@ -17,6 +18,7 @@ export {
 } from "./observation.js";
 export type {
   Observation,
+  ObservationBytes,
   ObservationSource,
   ObservationValidity,
 } from "./observation.js";
@@ -37,6 +39,7 @@ export type { AdapterContractInput } from "./adapter-contract.js";
 export type {
   AdapterHealth,
   AdapterOutcome,
+  AdapterOutcomeValue,
   DeviceAdapter,
   DiscoveredResource,
   OpenResult,

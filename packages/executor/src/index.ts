@@ -26,7 +26,14 @@ export interface ExecutorStatus {
 export const UNIMPLEMENTED_OUTCOME: ActionOutcome = "rejected";
 
 export { createResourceGate } from "./gate.js";
-export type { GateKind, GateResult, ResourceGate } from "./gate.js";
+export type {
+  GateAccepted,
+  GateKind,
+  GateRejected,
+  GateResult,
+  PolicyDecision,
+  ResourceGate,
+} from "./gate.js";
 
 export function executorStatus(): ExecutorStatus {
   return {

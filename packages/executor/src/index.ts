@@ -6,8 +6,8 @@
  * journal (#10), and ownership/serialization rules (#11). Adapters are
  * loaded here, never in the agent process.
  *
- * Scaffold only: the dispatch path, journal, and policy engine are
- * implemented by their owning issues.
+ * The action journal records outcomes before and after dispatch.
+ * Policy checks and ownership rules stay with their own issues.
  */
 import type { ActionOutcome } from "@november/core";
 
@@ -24,6 +24,13 @@ export interface ExecutorStatus {
 
 /** Outcome a not-yet-implemented executor must report: never a fake success. */
 export const UNIMPLEMENTED_OUTCOME: ActionOutcome = "rejected";
+
+export { JournalError, openJournal } from "./journal.js";
+export type {
+  ActionJournal,
+  JournalCommand,
+  JournalResult,
+} from "./journal.js";
 
 export function executorStatus(): ExecutorStatus {
   return {

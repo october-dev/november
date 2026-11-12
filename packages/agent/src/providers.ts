@@ -1,4 +1,4 @@
-import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
+import { stream as piStream } from "@earendil-works/pi-ai/api/openai-completions";
 import type {
   AssistantMessage,
   JsonObject,
@@ -7,13 +7,20 @@ import type {
   ToolCall,
   Usage,
 } from "@earendil-works/pi-ai";
+import {
+  fauxAssistantMessage,
+  fauxText,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
+import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { estimateTokens, type AgentLimits } from "./limits.js";
 
 /**
- * Pinned loop library. November keeps its own provider transport so device
- * transcripts are not sent through pi-ai's hosted SDK clients. Attribution
- * for the loop itself is in NOTICE.
+ * Pinned loop library. Model transcripts go through Pi's
+ * OpenAI-completions transport with November's endpoint, credential,
+ * retry, output-limit, and identity configuration. Attribution for the
+ * loop itself is in NOTICE.
  */
 export const AGENT_LOOP_LIBRARY = {
   name: "@earendil-works/pi-agent-core",
@@ -37,8 +44,15 @@ const EMPTY_USAGE: Usage = {
   },
 };
 
-const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
-const FIELD_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const MODEL_ID_MAX_LENGTH = 256;
+
+/** Internal stand-in so the SDK accepts a keyless local endpoint. Never sent. */
+const KEYLESS_PLACEHOLDER_KEY = "november-local-no-key";
+
+export const NOVEMBER_IDENTITY = {
+  userAgent: { custom: "november" },
+  attribution: { name: "november", url: "https://www.november.bot/" },
+} as const;
 
 export type FakeStep =
   | { readonly type: "text"; readonly text: string }
@@ -57,19 +71,37 @@ export type FakeStep =
   | { readonly type: "error"; readonly message: string }
   | { readonly type: "hang" };
 
+export type TokenField = "max_tokens" | "max_completion_tokens";
+
 export type ProviderSelection =
   | { readonly kind: "fake"; readonly script: readonly FakeStep[] }
   | {
       readonly kind: "hosted-openai";
+      /**
+       * API base including its version prefix, for example
+       * https://api.openai.com/v1. The transport appends /chat/completions.
+       */
       readonly baseUrl: string;
       readonly model: string;
       readonly apiKey: string;
+      /** Token-limit field. Defaults to Pi's per-endpoint detection. */
+      readonly tokenField?: TokenField;
+      /** Fetch implementation. Defaults to global fetch. */
+      readonly fetch?: typeof fetch;
     }
   | {
       readonly kind: "local-openai";
+      /** API base including its version prefix. See hosted-openai. */
       readonly baseUrl: string;
       readonly model: string;
       readonly apiKey?: string;
+      /**
+       * Token-limit field. Defaults to max_tokens for older local
+       * servers; select max_completion_tokens when the endpoint documents it.
+       */
+      readonly tokenField?: TokenField;
+      /** Fetch implementation. Defaults to global fetch. */
+      readonly fetch?: typeof fetch;
     };
 
 export interface ProviderRuntime {
@@ -86,6 +118,8 @@ export function modelFor(
   const id = selection.kind === "fake" ? "fake-fixture" : selection.model;
   const baseUrl =
     selection.kind === "fake" ? "http://127.0.0.1" : selection.baseUrl;
+  // The application budget, not a model window: November uses Pi's full
+  // stream(), which never applies context-window margin math.
   return {
     id,
     name: id,
@@ -97,6 +131,17 @@ export function modelFor(
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: limits.maxContextTokens,
     maxTokens: limits.maxOutputTokens,
+    ...(selection.kind === "fake"
+      ? {}
+      : {
+          compat: {
+            maxTokensField:
+              selection.tokenField ??
+              (selection.kind === "local-openai"
+                ? "max_tokens"
+                : ("max_completion_tokens" as const)),
+          },
+        }),
   };
 }
 
@@ -108,8 +153,24 @@ export function assertProviderSelection(selection: ProviderSelection): void {
     }
     return;
   }
-  if (!FIELD_PATTERN.test(selection.model)) {
-    throw new Error("model id must be an explicit short token");
+  if (
+    typeof selection.model !== "string" ||
+    selection.model.length === 0 ||
+    selection.model.length > MODEL_ID_MAX_LENGTH
+  ) {
+    throw new Error(
+      `model id must be a nonempty string of at most ${MODEL_ID_MAX_LENGTH} characters`,
+    );
+  }
+  if (
+    selection.tokenField !== undefined &&
+    selection.tokenField !== "max_tokens" &&
+    selection.tokenField !== "max_completion_tokens"
+  ) {
+    throw new Error("token field must be max_tokens or max_completion_tokens");
+  }
+  if (selection.fetch !== undefined && typeof selection.fetch !== "function") {
+    throw new Error("provider fetch must be a function");
   }
   const url = parseBaseUrl(selection.baseUrl);
   const loopback = isLoopback(url.hostname);
@@ -131,57 +192,212 @@ export function assertProviderSelection(selection: ProviderSelection): void {
 export function createStreamFn(
   runtime: ProviderRuntime,
   limits: AgentLimits,
-  toolSchema: object,
 ): StreamFn {
   return (model, context, options) => {
-    const stream = new AssistantMessageEventStream();
     const messages = context.messages;
     runtime.requestMessageCounts.push(messages.length);
     runtime.requestTokens.push(estimateTokens(messages));
-    void fulfill(
-      stream,
-      model,
-      messages,
-      options?.signal,
-      runtime,
-      limits,
-      toolSchema,
-    ).catch((error: unknown) => {
-      const message =
-        error instanceof Error ? error.message : "model request failed";
-      pushError(stream, model, redact(message, secretFrom(runtime)));
-    });
-    return stream;
+    const selection = runtime.selection;
+    if (!selection || selection.kind === "fake") {
+      return runFake(model, options?.signal, runtime, limits, selection);
+    }
+    return runPiStream(model, context, options, selection, limits);
   };
 }
 
-async function fulfill(
-  stream: AssistantMessageEventStream,
+function runPiStream(
   model: Model<string>,
-  messages: readonly unknown[],
+  context: Parameters<StreamFn>[1],
+  options: Parameters<StreamFn>[2],
+  selection: Extract<
+    ProviderSelection,
+    { kind: "hosted-openai" | "local-openai" }
+  >,
+  limits: AgentLimits,
+): AssistantMessageEventStream {
+  const userSignal = options?.signal;
+  const keyless = selection.kind === "local-openai" && !selection.apiKey;
+  const apiKey = selection.apiKey ?? KEYLESS_PLACEHOLDER_KEY;
+  // Pi's SDK timeout clears after response headers, so an explicit
+  // deadline covers the whole stream including the response body.
+  const deadline = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    deadline.abort();
+  }, limits.requestTimeoutMs);
+  const combined =
+    userSignal != null
+      ? AbortSignal.any([userSignal, deadline.signal])
+      : deadline.signal;
+  // November only ever selects openai-completions models (see modelFor).
+  const openAiModel = model as Model<"openai-completions">;
+  let inner: AssistantMessageEventStream;
+  try {
+    inner = piStream(openAiModel, context, {
+      signal: combined,
+      apiKey,
+      fetch: createGuardedFetch(
+        {
+          keyless,
+          maxResponseBytes: limits.maxResponseBytes,
+        },
+        selection.fetch,
+      ),
+      headers: options?.headers,
+      identity: options?.identity ?? NOVEMBER_IDENTITY,
+      timeoutMs: limits.requestTimeoutMs,
+      maxRetries: limits.maxRetries,
+      maxRetryDelayMs: limits.maxRetryDelayMs,
+      maxTokens: limits.maxOutputTokens,
+      temperature: options?.temperature,
+      samplingParams: options?.samplingParams,
+    });
+  } catch (error) {
+    clearTimeout(timer);
+    const failed = new AssistantMessageEventStream();
+    pushError(
+      failed,
+      model,
+      redact(errorText(error), keyless ? undefined : apiKey),
+    );
+    return failed;
+  }
+  const outer = new AssistantMessageEventStream();
+  const secret = keyless ? undefined : selection.apiKey;
+  void forwardWithTimeout(inner, outer, {
+    timer,
+    timedOut: () => timedOut && (userSignal == null || !userSignal.aborted),
+    secret,
+  });
+  return outer;
+}
+
+async function forwardWithTimeout(
+  inner: AssistantMessageEventStream,
+  outer: AssistantMessageEventStream,
+  options: {
+    timer: ReturnType<typeof setTimeout>;
+    timedOut: () => boolean;
+    secret: string | undefined;
+  },
+): Promise<void> {
+  try {
+    try {
+      for await (const event of inner) {
+        if (event.type === "error" && options.timedOut()) {
+          outer.push({
+            type: "error",
+            reason: "error",
+            error: timeoutMessage(event.error),
+          });
+          continue;
+        }
+        if (event.type === "error" && options.secret) {
+          outer.push({
+            ...event,
+            error: {
+              ...event.error,
+              errorMessage: event.error.errorMessage
+                ? redact(event.error.errorMessage, options.secret)
+                : undefined,
+            },
+          });
+          continue;
+        }
+        outer.push(event);
+      }
+    } catch (error) {
+      outer.push({
+        type: "error",
+        reason: "error",
+        error: {
+          role: "assistant",
+          content: [],
+          api: "openai-completions",
+          provider: "november",
+          model: "november",
+          usage: EMPTY_USAGE,
+          stopReason: "error",
+          errorMessage: options.secret
+            ? redact(errorText(error), options.secret)
+            : errorText(error),
+          timestamp: Date.now(),
+        },
+      });
+    }
+  } finally {
+    clearTimeout(options.timer);
+  }
+}
+
+function timeoutMessage(error: AssistantMessage): AssistantMessage {
+  return {
+    ...error,
+    stopReason: "error",
+    errorMessage: "model request timed out",
+  };
+}
+
+/**
+ * Fetch wrapper for provider requests: redirects are refused, a keyless
+ * local mode sends no authorization header, and response bodies are
+ * capped so one reply cannot allocate without bound.
+ */
+export function createGuardedFetch(
+  options: {
+    keyless: boolean;
+    maxResponseBytes: number;
+  },
+  impl: typeof fetch = fetch,
+): typeof fetch {
+  return (async (input, init) => {
+    const headers = new Headers(init?.headers);
+    if (options.keyless) headers.delete("authorization");
+    const response = await impl(input, {
+      ...init,
+      headers,
+      redirect: "error",
+    });
+    if (!response.body) return response;
+    let total = 0;
+    const cap = options.maxResponseBytes;
+    const capped = response.body.pipeThrough(
+      new TransformStream({
+        transform(chunk, controller) {
+          total += chunk.byteLength;
+          if (total > cap) {
+            controller.error(new Error("model response exceeded the byte cap"));
+            return;
+          }
+          controller.enqueue(chunk);
+        },
+      }),
+    );
+    return new Response(capped, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }) as typeof fetch;
+}
+
+function runFake(
+  model: Model<string>,
   signal: AbortSignal | undefined,
   runtime: ProviderRuntime,
   limits: AgentLimits,
-  toolSchema: object,
-): Promise<void> {
-  const selection = runtime.selection;
-  if (!selection) {
-    pushError(stream, model, "no provider selected");
-    return;
-  }
-  if (selection.kind === "fake") {
-    await fulfillFake(stream, model, signal, runtime, limits);
-    return;
-  }
-  await fulfillHttp(
-    stream,
-    model,
-    messages,
-    signal,
-    selection,
-    limits,
-    toolSchema,
+  selection: ProviderSelection | undefined,
+): AssistantMessageEventStream {
+  const stream = new AssistantMessageEventStream();
+  void fulfillFake(stream, model, signal, runtime, limits, selection).catch(
+    (error: unknown) => {
+      const message =
+        error instanceof Error ? error.message : "model request failed";
+      pushError(stream, model, message);
+    },
   );
+  return stream;
 }
 
 async function fulfillFake(
@@ -190,16 +406,16 @@ async function fulfillFake(
   signal: AbortSignal | undefined,
   runtime: ProviderRuntime,
   limits: AgentLimits,
+  selection: ProviderSelection | undefined,
 ): Promise<void> {
-  const selection = runtime.selection;
   if (!selection || selection.kind !== "fake") {
-    pushError(stream, model, "fake provider is not selected");
+    pushError(stream, model, "no provider selected");
     return;
   }
   const step = selection.script[runtime.scriptIndex];
   runtime.scriptIndex += 1;
   if (!step) {
-    pushDone(stream, model, "stop", "(no fixture response)", limits);
+    pushMessage(stream, model, "(no fixture response)", "stop", limits);
     return;
   }
   if (step.type === "hang") {
@@ -220,180 +436,47 @@ async function fulfillFake(
     return;
   }
   if (step.type === "text") {
-    pushDone(stream, model, "stop", step.text, limits);
+    pushMessage(stream, model, step.text, "stop", limits);
     return;
   }
   if (step.type === "malformed-tool") {
     pushTool(stream, model, {
-      type: "toolCall",
-      id: step.id ?? "call-malformed",
-      name: step.name,
-      arguments: {},
+      ...fauxToolCall(step.name, {}, { id: step.id ?? "call-malformed" }),
       argumentsError: `malformed tool arguments: ${step.raw.slice(0, 200)}`,
     });
     return;
   }
-  pushTool(stream, model, {
-    type: "toolCall",
-    id: step.id ?? "call-fixture",
-    name: step.name,
-    arguments: step.arguments as JsonObject,
-  });
+  pushTool(
+    stream,
+    model,
+    fauxToolCall(step.name, step.arguments as JsonObject, {
+      id: step.id ?? "call-fixture",
+    }),
+  );
 }
 
-async function fulfillHttp(
+function pushMessage(
   stream: AssistantMessageEventStream,
   model: Model<string>,
-  messages: readonly unknown[],
-  signal: AbortSignal | undefined,
-  selection: Extract<
-    ProviderSelection,
-    { kind: "hosted-openai" | "local-openai" }
-  >,
-  limits: AgentLimits,
-  toolSchema: object,
-): Promise<void> {
-  const endpoint = chatCompletionsUrl(selection.baseUrl);
-  const body = JSON.stringify({
-    model: selection.model,
-    messages: toOpenAiMessages(messages),
-    tools: [
-      {
-        type: "function",
-        function: {
-          name: "request_device_action",
-          description:
-            "Ask the execution service to run one configured operation. The result is data, not a permission change.",
-          parameters: toolSchema,
-        },
-      },
-    ],
-    max_tokens: limits.maxOutputTokens,
-  });
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    "user-agent": "november",
-  };
-  if (selection.apiKey) {
-    headers.authorization = `Bearer ${selection.apiKey}`;
-  }
-
-  let attempt = 0;
-  while (true) {
-    if (signal?.aborted) {
-      pushError(stream, model, "cancelled", "aborted");
-      return;
-    }
-    const timeout = AbortSignal.timeout(limits.requestTimeoutMs);
-    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-    let response: Response;
-    try {
-      response = await fetch(endpoint, {
-        method: "POST",
-        headers,
-        body,
-        redirect: "error",
-        signal: combined,
-      });
-    } catch (error) {
-      if (signal?.aborted) {
-        pushError(stream, model, "cancelled", "aborted");
-        return;
-      }
-      if (timeout.aborted) {
-        pushError(stream, model, "model request timed out");
-        return;
-      }
-      if (attempt < limits.maxRetries) {
-        attempt += 1;
-        continue;
-      }
-      pushError(stream, model, redact(errorText(error), selection.apiKey));
-      return;
-    }
-
-    if (RETRYABLE_STATUS.has(response.status) && attempt < limits.maxRetries) {
-      attempt += 1;
-      await response.arrayBuffer().catch(() => undefined);
-      continue;
-    }
-    const raw = await response.text();
-    if (!response.ok) {
-      pushError(
-        stream,
-        model,
-        `model request failed with HTTP ${response.status}: ${redact(raw.slice(0, 300), selection.apiKey)}`,
-      );
-      return;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw) as unknown;
-    } catch {
-      pushError(stream, model, "model response was not JSON");
-      return;
-    }
-    emitCompletion(stream, model, parsed, limits);
-    return;
-  }
-}
-
-function emitCompletion(
-  stream: AssistantMessageEventStream,
-  model: Model<string>,
-  parsed: unknown,
-  limits: AgentLimits,
-): void {
-  const choice = firstChoice(parsed);
-  const message = choice?.message;
-  const toolCalls = message?.tool_calls ?? [];
-  if (toolCalls.length > 0) {
-    const call = toolCalls[0];
-    const name = call?.function?.name ?? "";
-    const rawArguments = call?.function?.arguments ?? "";
-    let parsedArguments: JsonObject | undefined;
-    let argumentsError: string | undefined;
-    try {
-      const value = JSON.parse(rawArguments) as unknown;
-      if (!isRecord(value)) {
-        argumentsError = "tool arguments were not a JSON object";
-      } else {
-        parsedArguments = value as JsonObject;
-      }
-    } catch {
-      argumentsError = `malformed tool arguments: ${rawArguments.slice(0, 200)}`;
-    }
-    pushTool(stream, model, {
-      type: "toolCall",
-      id: call?.id || "call-provider",
-      name,
-      arguments: parsedArguments ?? {},
-      ...(argumentsError ? { argumentsError } : {}),
-    });
-    return;
-  }
-  const text = messageText(message?.content);
-  const reason: Extract<StopReason, "stop" | "length"> =
-    choice?.finish_reason === "length" ? "length" : "stop";
-  pushDone(stream, model, reason, text, limits);
-}
-
-function pushDone(
-  stream: AssistantMessageEventStream,
-  model: Model<string>,
-  reason: Extract<StopReason, "stop" | "length" | "toolUse">,
   text: string,
+  reason: Extract<StopReason, "stop" | "length">,
   limits: AgentLimits,
 ): void {
   let output = text;
-  let stop: typeof reason = reason;
+  let stop: Extract<StopReason, "stop" | "length"> = reason;
   const cap = limits.maxOutputTokens * 4;
   if (output.length > cap) {
     output = output.slice(0, cap);
     stop = "length";
   }
-  const message = assistant(model, [{ type: "text", text: output }], stop);
-  stream.push({ type: "start", partial: assistant(model, [], "stop") });
+  const message = {
+    ...fauxAssistantMessage(fauxText(output), { stopReason: stop }),
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: EMPTY_USAGE,
+  };
+  stream.push({ type: "start", partial: fauxPartial(model) });
   stream.push({ type: "done", reason: stop, message });
 }
 
@@ -402,8 +485,14 @@ function pushTool(
   model: Model<string>,
   toolCall: ToolCall,
 ): void {
-  const message = assistant(model, [toolCall], "toolUse");
-  stream.push({ type: "start", partial: assistant(model, [], "stop") });
+  const message = {
+    ...fauxAssistantMessage(toolCall, { stopReason: "toolUse" }),
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: EMPTY_USAGE,
+  };
+  stream.push({ type: "start", partial: fauxPartial(model) });
   stream.push({ type: "done", reason: "toolUse", message });
 }
 
@@ -413,26 +502,26 @@ function pushError(
   message: string,
   reason: "error" | "aborted" = "error",
 ): void {
-  const error = assistant(model, [], reason, message);
-  stream.push({ type: "error", reason, error });
-}
-
-function assistant(
-  model: Model<string>,
-  content: AssistantMessage["content"],
-  stopReason: StopReason,
-  errorMessage?: string,
-): AssistantMessage {
-  return {
-    role: "assistant",
-    content,
+  const error = {
+    ...fauxAssistantMessage([], {
+      stopReason: reason,
+      errorMessage: message,
+    }),
     api: model.api,
     provider: model.provider,
     model: model.id,
     usage: EMPTY_USAGE,
-    stopReason,
-    ...(errorMessage ? { errorMessage } : {}),
-    timestamp: Date.now(),
+  };
+  stream.push({ type: "error", reason, error });
+}
+
+function fauxPartial(model: Model<string>): AssistantMessage {
+  return {
+    ...fauxAssistantMessage([], { stopReason: "stop" }),
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: EMPTY_USAGE,
   };
 }
 
@@ -465,15 +554,6 @@ function parseBaseUrl(baseUrl: string): URL {
   return url;
 }
 
-function chatCompletionsUrl(baseUrl: string): string {
-  const url = parseBaseUrl(baseUrl);
-  const prefix = url.pathname.replace(/\/$/, "");
-  url.pathname = `${prefix}/v1/chat/completions`;
-  url.search = "";
-  url.hash = "";
-  return url.toString();
-}
-
 function isLoopback(hostname: string): boolean {
   return (
     hostname === "localhost" ||
@@ -483,12 +563,6 @@ function isLoopback(hostname: string): boolean {
   );
 }
 
-function secretFrom(runtime: ProviderRuntime): string | undefined {
-  const selection = runtime.selection;
-  if (!selection || selection.kind === "fake") return undefined;
-  return selection.apiKey;
-}
-
 export function redact(text: string, secret: string | undefined): string {
   if (!secret || secret.length < 4) return text;
   return text.split(secret).join("[redacted]");
@@ -496,113 +570,4 @@ export function redact(text: string, secret: string | undefined): string {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : "model request failed";
-}
-
-interface ChatChoice {
-  finish_reason?: string;
-  message?: {
-    content?: unknown;
-    tool_calls?: {
-      id?: string;
-      function?: { name?: string; arguments?: string };
-    }[];
-  };
-}
-
-function firstChoice(parsed: unknown): ChatChoice | undefined {
-  if (!isRecord(parsed) || !Array.isArray(parsed.choices)) return undefined;
-  const choice = parsed.choices[0];
-  return isRecord(choice) ? (choice as ChatChoice) : undefined;
-}
-
-function messageText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) =>
-      isRecord(part) && typeof part.text === "string" ? part.text : "",
-    )
-    .join("");
-}
-
-function toOpenAiMessages(messages: readonly unknown[]): {
-  role: string;
-  content?: string;
-  tool_call_id?: string;
-  tool_calls?: {
-    id: string;
-    type: "function";
-    function: { name: string; arguments: string };
-  }[];
-}[] {
-  const converted: ReturnType<typeof toOpenAiMessages> = [];
-  for (const message of messages) {
-    if (!isRecord(message) || typeof message.role !== "string") continue;
-    if (message.role === "system" || message.role === "user") {
-      converted.push({
-        role: message.role,
-        content: contentText(message.content),
-      });
-      continue;
-    }
-    if (message.role === "assistant") {
-      const text = contentText(message.content);
-      const toolCalls = toolCallsFrom(message.content);
-      converted.push({
-        role: "assistant",
-        ...(text ? { content: text } : { content: "" }),
-        ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-      });
-      continue;
-    }
-    if (message.role === "toolResult") {
-      converted.push({
-        role: "tool",
-        tool_call_id:
-          typeof message.toolCallId === "string" ? message.toolCallId : "",
-        content: contentText(message.content),
-      });
-    }
-  }
-  return converted;
-}
-
-function contentText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (!isRecord(part)) return "";
-      if (part.type === "text" && typeof part.text === "string")
-        return part.text;
-      if (part.type === "image") return "[image omitted]";
-      return "";
-    })
-    .join("");
-}
-
-function toolCallsFrom(content: unknown): {
-  id: string;
-  type: "function";
-  function: { name: string; arguments: string };
-}[] {
-  if (!Array.isArray(content)) return [];
-  const calls = [];
-  for (const part of content) {
-    if (!isRecord(part) || part.type !== "toolCall") continue;
-    if (typeof part.name !== "string" || typeof part.id !== "string") continue;
-    calls.push({
-      id: part.id,
-      type: "function" as const,
-      function: {
-        name: part.name,
-        arguments: JSON.stringify(part.arguments ?? {}),
-      },
-    });
-  }
-  return calls;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

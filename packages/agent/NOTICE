@@ -31,10 +31,11 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-pi-agent-core also depends on @earendil-works/pi-schema 1.5.2 and
-@earendil-works/pi-telemetry 1.5.2 from the same repository and license.
-pi-ai depends on provider SDKs, including openai, @anthropic-ai/sdk,
-@google/genai, and @aws-sdk/client-bedrock-runtime. November's adapter does
-not call those SDKs. Their own licenses remain in the published packages and
-must be kept when November packages a release (#24). Their install scripts
-are not enabled.
+pi-agent-core also depends on @earendil-works/pi-schema 1.5.2 from
+the same repository and license. pi-ai brings @earendil-works/pi-telemetry
+1.5.2 transitively, plus provider SDKs, including openai 7.19.0,
+@anthropic-ai/sdk, @google/genai, and @aws-sdk/client-bedrock-runtime.
+November's adapter uses pi-ai's OpenAI-completions transport, which calls
+the openai client; the other provider SDKs ship unused. Their own licenses
+remain in the published packages and must be kept when November packages a
+release (#24). Their install scripts are not enabled.

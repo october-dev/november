@@ -9,7 +9,7 @@ export { AGENT_LIMITS, estimateTokens } from "./limits.js";
 export type { AgentLimits } from "./limits.js";
 export { boundContext } from "./context.js";
 export { AGENT_LOOP_LIBRARY } from "./providers.js";
-export type { FakeStep, ProviderSelection } from "./providers.js";
+export type { FakeStep, ProviderSelection, TokenField } from "./providers.js";
 export { SessionError } from "./session.js";
 export type {
   ExecutionReply,

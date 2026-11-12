@@ -495,4 +495,242 @@ describe("device agent loop", () => {
     expect(saved).toContain("rejected");
     expect(saved).not.toContain("confirmed");
   });
+
+  it("refuses a second concurrent run without disturbing the first", async () => {
+    const agent = createDeviceAgent({
+      projectId: "bench",
+      deviceId: "led",
+      sessionDirectory: directory(),
+      execution: createRejectingExecutionClient(),
+      limits: { requestTimeoutMs: 500 },
+      provider: { kind: "fake", script: [{ type: "hang" }] },
+    });
+    const first = agent.run("wait");
+    await expect(agent.run("intrude")).rejects.toThrow(/already in progress/);
+    const result = await first;
+    expect(result.status).toBe("failed");
+    expect(result.turns).toBe(1);
+  });
+
+  it("marks duplicate replies as cached without resubmitting", async () => {
+    const { client, calls } = recordingClient({
+      outcome: "confirmed",
+      detail: "applied",
+    });
+    const sessionDirectory = directory();
+    const script = (text: string): { kind: "fake"; script: never[] } =>
+      ({
+        kind: "fake",
+        script: [
+          { type: "tool", name: HARDWARE_TOOL_NAME, arguments: deviceRequest },
+          { type: "text", text },
+        ],
+      }) as never;
+    const agent = createDeviceAgent({
+      projectId: "bench",
+      deviceId: "led",
+      sessionDirectory,
+      execution: client,
+      provider: script("first"),
+    });
+    expect((await agent.run("on")).hardwareSubmissions).toBe(1);
+    expect(calls).toHaveLength(1);
+    const again = createDeviceAgent({
+      projectId: "bench",
+      deviceId: "led",
+      sessionDirectory,
+      execution: client,
+      provider: script("second"),
+    });
+    expect((await again.run("on")).hardwareSubmissions).toBe(0);
+    expect(calls).toHaveLength(1);
+    const saved = JSON.parse(readFileSync(again.sessionPath, "utf8")) as {
+      messages: { role: string; text?: string }[];
+    };
+    const tools = saved.messages.filter((message) => message.role === "tool");
+    expect(tools).toHaveLength(2);
+    expect(JSON.parse(tools[0]?.text ?? "{}")).toMatchObject({
+      cached: false,
+      outcome: "confirmed",
+    });
+    expect(JSON.parse(tools[1]?.text ?? "{}")).toMatchObject({
+      cached: true,
+      outcome: "confirmed",
+    });
+  });
+
+  it("leaves a durable unknown record when a restart interrupts submission", async () => {
+    const sessionDirectory = directory();
+    const calls: HardwareRequest[] = [];
+    let release!: (reply: ExecutionReply) => void;
+    const gate = new Promise<ExecutionReply>((resolve) => {
+      release = resolve;
+    });
+    const hanging: ExecutionClient = {
+      async submit(request) {
+        calls.push(request);
+        return gate;
+      },
+    };
+    const first = createDeviceAgent({
+      projectId: "bench",
+      deviceId: "led",
+      sessionDirectory,
+      execution: hanging,
+      provider: {
+        kind: "fake",
+        script: [
+          { type: "tool", name: HARDWARE_TOOL_NAME, arguments: deviceRequest },
+        ],
+      },
+    });
+    const running = first.run("on");
+    while (calls.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    // A second process starts while the first submission is unresolved.
+    const again = recordingClient({ outcome: "confirmed", detail: "late" });
+    const second = createDeviceAgent({
+      projectId: "bench",
+      deviceId: "led",
+      sessionDirectory,
+      execution: again.client,
+      provider: {
+        kind: "fake",
+        script: [
+          { type: "tool", name: HARDWARE_TOOL_NAME, arguments: deviceRequest },
+          { type: "text", text: "replayed" },
+        ],
+      },
+    });
+    const replayed = await second.run("on");
+    expect(replayed.hardwareSubmissions).toBe(0);
+    expect(again.calls).toEqual([]);
+    const saved = JSON.parse(readFileSync(second.sessionPath, "utf8")) as {
+      submitted: { reply: { outcome: string } }[];
+    };
+    expect(saved.submitted).toEqual([
+      { request: deviceRequest, reply: expect.anything() },
+    ]);
+    expect(saved.submitted[0]?.reply.outcome).toBe("unknown");
+    release({ outcome: "confirmed", detail: "late" });
+    const finished = await running;
+    expect(finished.hardwareSubmissions).toBe(1);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("makes no submission when the command record cannot be saved", async () => {
+    const { client, calls } = recordingClient({
+      outcome: "confirmed",
+      detail: "applied",
+    });
+    const agent = createDeviceAgent({
+      projectId: "bench",
+      deviceId: "led",
+      sessionDirectory: directory(),
+      execution: client,
+      limits: { maxSessionBytes: 128 },
+      provider: {
+        kind: "fake",
+        script: [
+          { type: "tool", name: HARDWARE_TOOL_NAME, arguments: deviceRequest },
+          { type: "text", text: "done" },
+        ],
+      },
+    });
+    await agent.run("on");
+    expect(calls).toEqual([]);
+    // The refusal persists: later runs still submit nothing.
+    expect(() =>
+      agent.selectProvider({
+        kind: "fake",
+        script: [
+          { type: "tool", name: HARDWARE_TOOL_NAME, arguments: deviceRequest },
+          { type: "text", text: "done" },
+        ],
+      }),
+    ).toThrow(/byte cap/);
+    await agent.run("on");
+    expect(calls).toEqual([]);
+  });
+
+  it("fails before any model call when the prompt cannot fit", async () => {
+    const agent = createDeviceAgent({
+      projectId: "bench",
+      deviceId: "led",
+      sessionDirectory: directory(),
+      execution: createRejectingExecutionClient(),
+      provider: { kind: "fake", script: [{ type: "text", text: "hi" }] },
+    });
+    const result = await agent.run("x".repeat(40_000));
+    expect(result.status).toBe("failed");
+    expect(result.error).toMatch(/budget/);
+  });
+
+  it("drops an oversized tool group instead of altering the call", async () => {
+    const agent = createDeviceAgent({
+      projectId: "bench",
+      deviceId: "led",
+      sessionDirectory: directory(),
+      execution: createRejectingExecutionClient(),
+      limits: { maxContextTokens: 400 },
+      provider: {
+        kind: "fake",
+        script: [
+          {
+            type: "tool",
+            name: HARDWARE_TOOL_NAME,
+            arguments: {
+              ...deviceRequest,
+              payload: { blob: "y".repeat(4_000) },
+            },
+          },
+          { type: "text", text: "done" },
+        ],
+      },
+    });
+    const result = await agent.run("go");
+    expect(result.status).toBe("completed");
+    expect(result.text).toBe("done");
+  });
+
+  it("records unknown when cancellation interrupts submission and ignores the late reply", async () => {
+    const sessionDirectory = directory();
+    const calls: HardwareRequest[] = [];
+    let release!: (reply: ExecutionReply) => void;
+    const gate = new Promise<ExecutionReply>((resolve) => {
+      release = resolve;
+    });
+    const agent = createDeviceAgent({
+      projectId: "bench",
+      deviceId: "led",
+      sessionDirectory,
+      execution: {
+        async submit(request) {
+          calls.push(request);
+          return gate;
+        },
+      },
+      provider: {
+        kind: "fake",
+        script: [
+          { type: "tool", name: HARDWARE_TOOL_NAME, arguments: deviceRequest },
+        ],
+      },
+    });
+    const controller = new AbortController();
+    const running = agent.run("on", { signal: controller.signal });
+    while (calls.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    controller.abort();
+    const result = await running;
+    expect(result.status).toBe("cancelled");
+    release({ outcome: "confirmed", detail: "late" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const saved = JSON.parse(readFileSync(agent.sessionPath, "utf8")) as {
+      submitted: { reply: { outcome: string } }[];
+    };
+    expect(saved.submitted[0]?.reply.outcome).toBe("unknown");
+  });
 });

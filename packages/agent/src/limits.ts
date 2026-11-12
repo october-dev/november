@@ -13,7 +13,9 @@ export const AGENT_LIMITS = {
   maxContextTokens: 8_192,
   maxOutputTokens: 1_024,
   maxRetries: 2,
+  maxRetryDelayMs: 10_000,
   requestTimeoutMs: 30_000,
+  maxResponseBytes: 1_048_576,
   maxContextMessages: 40,
   maxSessionMessages: 40,
   maxSessionBytes: 256 * 1024,
@@ -24,14 +26,43 @@ export interface AgentLimits {
   maxContextTokens: number;
   maxOutputTokens: number;
   maxRetries: number;
+  maxRetryDelayMs: number;
   requestTimeoutMs: number;
+  maxResponseBytes: number;
   maxContextMessages: number;
   maxSessionMessages: number;
   maxSessionBytes: number;
 }
 
+const MINIMUMS: Record<keyof AgentLimits, number> = {
+  maxTurns: 1,
+  maxContextTokens: 1,
+  maxOutputTokens: 1,
+  maxRetries: 0,
+  maxRetryDelayMs: 0,
+  requestTimeoutMs: 1,
+  maxResponseBytes: 1,
+  maxContextMessages: 1,
+  maxSessionMessages: 1,
+  maxSessionBytes: 1,
+};
+
 export function resolveLimits(overrides?: Partial<AgentLimits>): AgentLimits {
-  return { ...AGENT_LIMITS, ...overrides };
+  const limits = { ...AGENT_LIMITS, ...overrides };
+  for (const [name, minimum] of Object.entries(MINIMUMS) as Array<
+    [keyof AgentLimits, number]
+  >) {
+    const value = limits[name];
+    if (
+      typeof value !== "number" ||
+      !Number.isFinite(value) ||
+      !Number.isInteger(value) ||
+      value < minimum
+    ) {
+      throw new RangeError(`${name} must be an integer >= ${minimum}`);
+    }
+  }
+  return limits;
 }
 
 /** Rough token count used only to enforce the context and session caps. */

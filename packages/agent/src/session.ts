@@ -1,7 +1,16 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  fchmodSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeSync,
+} from "node:fs";
 import path from "node:path";
 import type { ActionOutcome } from "@november/core";
-import { estimateTokens, type AgentLimits } from "./limits.js";
+import { type AgentLimits } from "./limits.js";
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const READ_CAP_BYTES = 1024 * 1024;
@@ -28,7 +37,8 @@ export interface ExecutionReply {
 
 export interface SubmittedAction {
   readonly request: HardwareRequest;
-  readonly reply: ExecutionReply;
+  /** Starts unknown at reservation; replaced when the reply arrives. */
+  reply: ExecutionReply;
 }
 
 export type StoredMessage =
@@ -54,7 +64,6 @@ export interface SessionState {
   readonly version: 1;
   readonly projectId: string;
   readonly deviceId: string;
-  providerKind: string | null;
   messages: StoredMessage[];
   /** Command ids already handed to the execution service. Never trimmed. */
   submitted: SubmittedAction[];
@@ -76,7 +85,6 @@ export function emptySession(
     version: 1,
     projectId,
     deviceId,
-    providerKind: null,
     messages: [],
     submitted: [],
   };
@@ -129,25 +137,65 @@ export class SessionStore {
         "session exceeds its byte cap and command ids cannot be discarded to make room",
       );
     }
-    mkdirSync(path.dirname(this.filePath), { recursive: true });
-    const temporary = `${this.filePath}.tmp`;
-    writeFileSync(temporary, body, { mode: 0o600 });
-    renameSync(temporary, this.filePath);
+    persistFile(this.filePath, body);
   }
 }
 
-function trimMessages(state: SessionState, limits: AgentLimits): SessionState {
-  const messages = state.messages.slice();
-  while (messages.length > limits.maxSessionMessages) {
-    messages.shift();
+/**
+ * Trim whole conversation groups oldest-first: a tool result always stays
+ * with the assistant message that requested it. Byte pressure is measured
+ * in UTF-8 bytes of the serialized state, so non-ASCII text cannot defeat
+ * the budget. At least one group is kept; the command record is separate
+ * and is never trimmed.
+ */
+export function trimMessages(
+  state: SessionState,
+  limits: AgentLimits,
+): SessionState {
+  const groups = groupStored(state.messages);
+  const kept = [...groups];
+  const overCount = () => kept.flat().length > limits.maxSessionMessages;
+  const overBytes = () =>
+    Buffer.byteLength(JSON.stringify({ ...state, messages: kept.flat() })) >
+    limits.maxSessionBytes;
+  while (kept.length > 1 && (overCount() || overBytes())) {
+    kept.shift();
   }
-  while (
-    messages.length > 1 &&
-    estimateTokens({ ...state, messages }) * 4 > limits.maxSessionBytes
-  ) {
-    messages.shift();
+  return { ...state, messages: kept.flat() };
+}
+
+function groupStored(messages: readonly StoredMessage[]): StoredMessage[][] {
+  const groups: StoredMessage[][] = [];
+  for (const message of messages) {
+    const previous = groups[groups.length - 1];
+    if (message.role === "tool" && previous) {
+      previous.push(message);
+      continue;
+    }
+    groups.push([message]);
   }
-  return { ...state, messages };
+  return groups;
+}
+
+function persistFile(filePath: string, body: string): void {
+  mkdirSync(path.dirname(filePath), { recursive: true });
+  const directory = path.dirname(filePath);
+  const temporary = `${filePath}.tmp`;
+  const fd = openSync(temporary, "w", 0o600);
+  try {
+    fchmodSync(fd, 0o600);
+    writeSync(fd, body);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temporary, filePath);
+  const dirFd = openSync(directory, "r");
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
 }
 
 function parseSession(raw: string, filePath: string): SessionState {
@@ -172,17 +220,10 @@ function parseSession(raw: string, filePath: string): SessionState {
   }
   const messages = parsed.messages.map(parseMessage);
   const submitted = parsed.submitted.map(parseSubmitted);
-  const providerKind =
-    parsed.providerKind === null || parsed.providerKind === undefined
-      ? null
-      : typeof parsed.providerKind === "string"
-        ? parsed.providerKind
-        : null;
   return {
     version: 1,
     projectId,
     deviceId,
-    providerKind,
     messages,
     submitted,
   };

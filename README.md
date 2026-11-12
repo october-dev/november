@@ -93,7 +93,7 @@ Things like pumps, motors and mains-powered devices show why the safety rules ma
 - **Two front doors.** You reach November from a terminal while you build, or it runs as a background service on the device. Both use the same core.
 - **The agent asks; November decides.** The agent never touches the hardware directly. It sends a request. A separate process checks it against the rules and then carries it out.
 - **Hardware is reached through adapters.** Small pieces of code that know how to speak serial, GPIO, I2C, SPI or MQTT. Simulated versions let you test without real parts.
-- **Reuse, don't reinvent.** November plans to reuse an existing agent loop (the part that runs the conversation with the model) rather than write its own. The first candidate is the core of the Pi agent project. November itself adds the device tools, permissions, action logs and recovery.
+- **Reuse, don't reinvent.** November reuses the Pi agent project's loop and model transport (the parts that run the conversation with the model) rather than writing its own. November itself adds the device tools, permissions, action logs and recovery.
 - **Shipped devices stay lean.** They do not need the coding interface or the development permissions.
 
 ## Supported hardware

@@ -34,22 +34,28 @@ export const SYSTEM_PROMPT = [
   "Do not invent command results. Cancelling a turn does not undo a request the execution service already accepted.",
 ].join("\n");
 
+const NAME_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
 const TOOL_PARAMETERS = {
   type: "object",
   additionalProperties: false,
   required: ["commandId", "deviceId", "operation", "deadlineMs"],
   properties: {
-    commandId: { type: "string", minLength: 1, maxLength: 128 },
-    deviceId: { type: "string", minLength: 1, maxLength: 128 },
-    operation: { type: "string", minLength: 1, maxLength: 128 },
+    commandId: {
+      type: "string",
+      pattern: NAME_PATTERN.source,
+      description:
+        "Idempotency key for this request: reuse it only to retry the identical request; use a new id for a distinct action.",
+    },
+    deviceId: { type: "string", pattern: NAME_PATTERN.source },
+    operation: { type: "string", pattern: NAME_PATTERN.source },
     deadlineMs: { type: "integer", minimum: 1, maximum: 86_400_000 },
     payload: {},
   },
 } as const;
 
-const NAME_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const DETAIL_CAP = 2_048;
-const PAYLOAD_CAP = 8_192;
+const PAYLOAD_CAP_BYTES = 8_192;
 
 export interface ExecutionClient {
   submit(
@@ -126,6 +132,7 @@ export class DeviceAgent {
   private readonly runtime: ProviderRuntime;
   private readonly agent: Agent;
   private tracker: RunTracker = freshTracker();
+  private storeFailed = false;
 
   constructor(options: DeviceAgentOptions) {
     this.limits = resolveLimits(options.limits);
@@ -150,20 +157,12 @@ export class DeviceAgent {
         systemPrompt: SYSTEM_PROMPT,
         tools: [tool],
       },
-      streamFn: createStreamFn(this.runtime, this.limits, TOOL_PARAMETERS),
+      streamFn: createStreamFn(this.runtime, this.limits),
       transformContext: async (messages) => boundContext(messages, this.limits),
       toolExecution: "sequential",
       identity: {
+        userAgent: { custom: "november" },
         attribution: { name: "november", url: "https://www.november.bot/" },
-      },
-      beforeToolCall: async ({ toolCall }) => {
-        if (toolCall.name !== HARDWARE_TOOL_NAME) {
-          return {
-            block: true,
-            reason: `tool ${toolCall.name} is not available`,
-          };
-        }
-        return undefined;
       },
       finishTurn: async ({ message, toolResults }) => {
         this.tracker.turns += 1;
@@ -199,7 +198,6 @@ export class DeviceAgent {
     this.runtime.selection = selection;
     this.runtime.scriptIndex = 0;
     this.agent.state.model = modelFor(selection, this.limits);
-    this.session.providerKind = selection.kind;
     this.persist();
   }
 
@@ -207,6 +205,9 @@ export class DeviceAgent {
     input: string,
     opts?: { signal?: AbortSignal },
   ): Promise<RunResult> {
+    if (this.agent.state.isStreaming) {
+      throw new Error("agent run already in progress");
+    }
     this.tracker = freshTracker();
     this.runtime.requestMessageCounts = [];
     this.runtime.requestTokens = [];
@@ -230,6 +231,7 @@ export class DeviceAgent {
     } finally {
       opts?.signal?.removeEventListener("abort", onAbort);
     }
+    this.reconcileTerminalFailure();
     if (this.tracker.cancelled || opts?.signal?.aborted) {
       return this.finish("cancelled", this.tracker.error ?? "cancelled");
     }
@@ -245,6 +247,7 @@ export class DeviceAgent {
   private finish(status: RunResult["status"], error?: string): RunResult {
     let persistError: string | undefined;
     try {
+      this.boundMemory();
       this.projectTranscript();
       this.persist();
     } catch (caught) {
@@ -270,6 +273,63 @@ export class DeviceAgent {
     this.store.save(this.session);
   }
 
+  /**
+   * Submit while racing the caller's abort signal. Cancellation, errors,
+   * and malformed replies all become unknown: the action may have run.
+   * A reply that arrives after cancellation is ignored; uncertainty stands.
+   */
+  private async submitGuarded(
+    entry: SubmittedAction,
+    signal: AbortSignal | undefined,
+  ): Promise<ExecutionReply> {
+    if (signal?.aborted) return unknownReply();
+    // Deferred so a synchronously throwing client becomes unknown too.
+    const pending = Promise.resolve().then(() =>
+      this.execution.submit(
+        entry.request,
+        signal ?? new AbortController().signal,
+      ),
+    );
+    const quiet = pending.then(
+      (reply) => ({ ok: true as const, reply }),
+      () => ({ ok: false as const }),
+    );
+    if (!signal) {
+      const settled = await quiet;
+      return settled.ok ? normalizeReply(settled.reply) : unknownReply();
+    }
+    let onAbort: (() => void) | undefined;
+    try {
+      const aborted = new Promise<"aborted">((resolve) => {
+        onAbort = () => resolve("aborted");
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      const settled = await Promise.race([quiet, aborted]);
+      if (settled === "aborted" || !settled.ok) return unknownReply();
+      return normalizeReply(settled.reply);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /**
+   * Pi records a failed preparation (for example an over-budget context)
+   * as an error turn without calling finishTurn. Attribute that terminal
+   * failure to this run so it cannot report completed.
+   */
+  private reconcileTerminalFailure(): void {
+    const messages = this.agent.state.messages;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (!message || message.role !== "assistant") continue;
+      if (message.stopReason === "error" && !this.tracker.error) {
+        this.tracker.error = message.errorMessage ?? "model request failed";
+      }
+      if (message.stopReason === "aborted") this.tracker.cancelled = true;
+      return;
+    }
+  }
+
   private createTool(): AgentTool {
     return {
       name: HARDWARE_TOOL_NAME,
@@ -290,31 +350,48 @@ export class DeviceAgent {
               `command ${request.commandId} was already submitted with different parameters`,
             );
           }
-          return toolData(prior.reply, request.commandId);
+          return toolData(prior.reply, request.commandId, true);
+        }
+        if (this.storeFailed) {
+          throw new Error(
+            "session storage failed; refusing new submissions until restart",
+          );
         }
         if (signal?.aborted) {
           throw new Error(
             "cancelled before the execution service accepted the request",
           );
         }
-        let reply: ExecutionReply;
-        try {
-          reply = normalizeReply(
-            await this.execution.submit(
-              request,
-              signal ?? new AbortController().signal,
-            ),
-          );
-        } catch {
-          reply = {
+        // Reserve the id with an unknown outcome before submitting. If the
+        // reservation cannot be saved, make no submission at all.
+        const entry: SubmittedAction = {
+          request,
+          reply: {
             outcome: "unknown",
-            detail:
-              "execution service did not return a result; the action was not retried",
-          };
+            detail: "submission outcome unknown",
+          },
+        };
+        this.session.submitted.push(entry);
+        try {
+          this.persist();
+        } catch (error) {
+          this.session.submitted.pop();
+          this.storeFailed = true;
+          throw new Error(
+            `session could not record the submission; the action was not submitted: ${errorText(error)}`,
+          );
         }
-        this.session.submitted.push({ request, reply });
+        const reply = await this.submitGuarded(entry, signal);
+        entry.reply = reply;
+        try {
+          this.persist();
+        } catch {
+          // The reply is lost but the durable unknown record stands: a
+          // restart replays uncertainty instead of resubmitting.
+          this.storeFailed = true;
+        }
         this.tracker.submissions += 1;
-        return toolData(reply, request.commandId);
+        return toolData(reply, request.commandId, false);
       },
     };
   }
@@ -335,6 +412,38 @@ export class DeviceAgent {
     }
     this.session.messages = stored;
   }
+
+  /**
+   * Keep the live transcript within the session caps, oldest groups
+   * first, so memory cannot grow across runs. The baseline system
+   * message always stays; the command record lives separately.
+   */
+  private boundMemory(): void {
+    const messages = this.agent.state.messages;
+    if (messages.length === 0) return;
+    const baseline = messages[0];
+    const groups: AgentMessage[][] = [];
+    for (const message of messages.slice(1)) {
+      const previous = groups[groups.length - 1];
+      if (message.role === "toolResult" && previous) {
+        previous.push(message);
+        continue;
+      }
+      groups.push([message]);
+    }
+    const kept = [...groups];
+    const over = (): boolean =>
+      1 + kept.flat().length > this.limits.maxSessionMessages ||
+      Buffer.byteLength(
+        JSON.stringify(baseline ? [baseline, ...kept.flat()] : kept.flat()),
+      ) > this.limits.maxSessionBytes;
+    while (kept.length > 1 && over()) {
+      kept.shift();
+    }
+    this.agent.state.messages = baseline
+      ? [baseline, ...kept.flat()]
+      : kept.flat();
+  }
 }
 
 export function createDeviceAgent(options: DeviceAgentOptions): DeviceAgent {
@@ -351,16 +460,29 @@ function freshTracker(): RunTracker {
   };
 }
 
-function toolData(reply: ExecutionReply, commandId: string) {
+function toolData(reply: ExecutionReply, commandId: string, cached: boolean) {
   const text = JSON.stringify({
     commandId,
     outcome: reply.outcome,
     detail: reply.detail.slice(0, DETAIL_CAP),
+    cached,
   });
   return {
     content: [{ type: "text" as const, text }],
-    details: { commandId, outcome: reply.outcome },
+    details: { commandId, outcome: reply.outcome, cached },
   };
+}
+
+function unknownReply(): ExecutionReply {
+  return {
+    outcome: "unknown",
+    detail:
+      "execution service did not return a result; the action was not retried",
+  };
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : "session could not be saved";
 }
 
 function validateRequest(params: unknown): HardwareRequest {
@@ -385,7 +507,7 @@ function validateRequest(params: unknown): HardwareRequest {
   } catch {
     throw new Error("payload must be JSON");
   }
-  if (encoded === undefined || encoded.length > PAYLOAD_CAP) {
+  if (encoded === undefined || Buffer.byteLength(encoded) > PAYLOAD_CAP_BYTES) {
     throw new Error("payload exceeds 8 KiB");
   }
   return { commandId, deviceId, operation, payload, deadlineMs };
@@ -437,6 +559,11 @@ function projectMessage(message: AgentMessage): StoredMessage | undefined {
     return { role: "user", text: textOf(message.content) };
   }
   if (message.role === "assistant") {
+    // Failed and aborted turns never enter saved history: restoring them
+    // as successful turns would replay failure as fact.
+    if (message.stopReason === "error" || message.stopReason === "aborted") {
+      return undefined;
+    }
     const toolCalls = message.content
       .filter((part) => part.type === "toolCall")
       .map((part) => ({
@@ -523,6 +650,3 @@ function textOf(content: unknown): string {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
-export { SessionError };
-export type { SubmittedAction };

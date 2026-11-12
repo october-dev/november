@@ -60,6 +60,14 @@ const says = (message: string) => ({
     issue.input === undefined ? "is required" : message,
 });
 
+/** Like `says`, for a tagged object: a value that is not an object says so. */
+const saysTagged = (message: string) => ({
+  error: (issue: { input: unknown; code: string }) => {
+    if (issue.input === undefined) return "is required";
+    return issue.code === "invalid_type" ? "must be an object" : message;
+  },
+});
+
 const integer = (min: number, max: number, message?: string) => {
   const text = message ?? `must be an integer from ${min} to ${max}`;
   return z
@@ -110,7 +118,7 @@ const SpiTransportSchema = z.strictObject({
 const TransportSchema = z.discriminatedUnion(
   "type",
   [GpioTransportSchema, I2cTransportSchema, SpiTransportSchema],
-  says('must be one of "gpio", "i2c", "spi"'),
+  saysTagged('must be one of "gpio", "i2c", "spi"'),
 );
 
 const BooleanValue = z.strictObject({ type: z.literal("boolean") });
@@ -141,7 +149,7 @@ const OperationSchema = z.discriminatedUnion(
       value: z.discriminatedUnion(
         "type",
         [BooleanValue, NumberValue, BytesValue],
-        says('must be one of "boolean", "number", "bytes"'),
+        saysTagged('must be one of "boolean", "number", "bytes"'),
       ),
     }),
     z.strictObject({
@@ -150,7 +158,7 @@ const OperationSchema = z.discriminatedUnion(
       value: z.discriminatedUnion(
         "type",
         [BooleanValue, NumberValue],
-        says("an actuate operation must take a boolean or number"),
+        saysTagged("an actuate operation must take a boolean or number"),
       ),
       /** Longest time the output may hold a non-safe value, or the explicit exception "unlimited". */
       maxActiveMs: z.union(
@@ -164,11 +172,11 @@ const OperationSchema = z.discriminatedUnion(
       value: z.discriminatedUnion(
         "type",
         [BytesValue],
-        says("a transfer operation must take bytes"),
+        saysTagged("a transfer operation must take bytes"),
       ),
     }),
   ],
-  says('must be one of "read", "actuate", "transfer"'),
+  saysTagged('must be one of "read", "actuate", "transfer"'),
 );
 
 const SafeStateSchema = z.strictObject(
@@ -218,7 +226,11 @@ const DeviceConfigSchema = z.strictObject(
               "must be a reference like env:NAME or file:/absolute/path, not a secret value",
             ),
           ),
-        says("must be an object"),
+        {
+          // The record also reports a bad name, which needs the name wording.
+          error: (issue: { code: string }) =>
+            issue.code === "invalid_key" ? ID_MESSAGE : "must be an object",
+        },
       )
       .default({}),
   },

@@ -198,6 +198,16 @@ describe("parseDeviceConfig", () => {
         "is required",
       ],
       ["devices", (i) => (i.devices = {}), "must be a list"],
+      [
+        "devices[0].transport",
+        (i) => (i.devices[0].transport = "gpio"),
+        "must be an object",
+      ],
+      [
+        "devices[0].operations[0].value",
+        (i) => (i.devices[0].operations[0].value = "boolean"),
+        "must be an object",
+      ],
     ];
     for (const [path, change, message] of cases) {
       const input = example();
@@ -494,5 +504,15 @@ describe("parseDeviceConfig", () => {
     const errors = errorsOf(pasted);
     expect(errors.map((e) => e.path)).toEqual(["secrets.api-key"]);
     expect(JSON.stringify(errors)).not.toContain("sk-not-a-real-key-123");
+
+    const badName = example();
+    badName.secrets = { API_KEY: "env:PROVIDER_KEY" };
+    expect(errorsOf(badName)).toEqual([
+      {
+        path: "secrets.API_KEY",
+        message:
+          "must be lowercase letters, digits or dashes, starting with a letter",
+      },
+    ]);
   });
 });

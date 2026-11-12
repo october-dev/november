@@ -8,3 +8,11 @@
  */
 export { listSimulatedDevices } from "./simulated.js";
 export type { SimulatedDevice } from "./simulated.js";
+export {
+  HEARTBEAT_CUTOFF_MS,
+  PICO_DEFAULT_ACTIVE_MS,
+  PICO_MAX_ACTIVE_MS,
+  createHostLed,
+  createPicoLed,
+} from "./watchdog.js";
+export type { CommandResult, ProtectedLed } from "./watchdog.js";

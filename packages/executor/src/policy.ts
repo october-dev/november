@@ -1,6 +1,9 @@
 /**
  * Device policy loaded by the execution service, not by the model.
- * Parsing copies the value, so later edits to the caller's object do nothing.
+ * Parsing rebuilds the value, so later edits to the caller's object
+ * do nothing. Identifiers must be unambiguous: duplicate callers,
+ * devices, operations, and grants are rejected, as are references to
+ * devices, operations, and precondition outputs that do not exist.
  */
 export interface NumberValue {
   readonly type: "number";
@@ -8,13 +11,20 @@ export interface NumberValue {
   readonly max: number;
 }
 
+export interface StateRequirement {
+  /** Operation on the same device whose observed value is compared. */
+  readonly output: string;
+  readonly equals: boolean | number;
+}
+
 export interface PolicyOperation {
   readonly name: string;
   readonly access: "read" | "actuate";
   readonly value: "boolean" | NumberValue;
-  readonly maxActiveMs?: number;
+  /** Actuate only: longest hold, or the explicit "unlimited" exception. */
+  readonly maxActiveMs?: number | "unlimited";
   readonly maxPerMinute?: number;
-  readonly requiresState?: boolean | number;
+  readonly requiresState?: StateRequirement;
 }
 
 export interface CallerGrant {
@@ -46,7 +56,6 @@ export type PolicyResult =
   | { readonly ok: false; readonly errors: readonly PolicyError[] };
 
 const NAME = /^[a-z][a-z0-9-]{0,63}$/;
-const BLOCKED_NAMES = new Set(["shell", "sh", "bash", "policy", "credential"]);
 
 export function parsePolicy(input: unknown): PolicyResult {
   if (!isRecord(input)) return fail("", "must be an object");
@@ -73,6 +82,7 @@ export function parsePolicy(input: unknown): PolicyResult {
   }
 
   const callers: CallerGrant[] = [];
+  const callerIds = new Set<string>();
   callerInput.forEach((caller, index) => {
     const path = `callers[${index}]`;
     if (!isRecord(caller)) {
@@ -85,11 +95,19 @@ export function parsePolicy(input: unknown): PolicyResult {
         path: `${path}.id`,
         message: "must be a lowercase identifier",
       });
+    } else if (callerIds.has(caller.id)) {
+      errors.push({
+        path: `${path}.id`,
+        message: "caller id is already defined",
+      });
+    } else {
+      callerIds.add(caller.id);
     }
     if (!Array.isArray(caller.allow)) {
       errors.push({ path: `${path}.allow`, message: "must be a list" });
       return;
     }
+    const deviceIds = new Set<string>();
     const allow = caller.allow.map((grant, grantIndex) => {
       const grantPath = `${path}.allow[${grantIndex}]`;
       if (!isRecord(grant)) {
@@ -102,6 +120,13 @@ export function parsePolicy(input: unknown): PolicyResult {
           path: `${grantPath}.deviceId`,
           message: "must be a lowercase identifier",
         });
+      } else if (deviceIds.has(grant.deviceId)) {
+        errors.push({
+          path: `${grantPath}.deviceId`,
+          message: "device is already granted to this caller",
+        });
+      } else {
+        deviceIds.add(grant.deviceId);
       }
       if (
         !Array.isArray(grant.operations) ||
@@ -126,6 +151,7 @@ export function parsePolicy(input: unknown): PolicyResult {
   });
 
   const devices: PolicyDevice[] = [];
+  const deviceIds = new Set<string>();
   deviceInput.forEach((device, index) => {
     const path = `devices[${index}]`;
     if (!isRecord(device)) {
@@ -138,33 +164,118 @@ export function parsePolicy(input: unknown): PolicyResult {
         path: `${path}.id`,
         message: "must be a lowercase identifier",
       });
+    } else if (deviceIds.has(device.id)) {
+      errors.push({
+        path: `${path}.id`,
+        message: "device id is already defined",
+      });
+    } else {
+      deviceIds.add(device.id);
     }
     if (!Array.isArray(device.operations)) {
       errors.push({ path: `${path}.operations`, message: "must be a list" });
       return;
     }
     const operations: PolicyOperation[] = [];
+    const names = new Set<string>();
     device.operations.forEach((operation, opIndex) => {
       const opPath = `${path}.operations[${opIndex}]`;
+      if (
+        isRecord(operation) &&
+        typeof operation.name === "string" &&
+        NAME.test(operation.name)
+      ) {
+        if (names.has(operation.name)) {
+          errors.push({
+            path: `${opPath}.name`,
+            message: "operation name is already defined on this device",
+          });
+        } else {
+          names.add(operation.name);
+        }
+      }
       const parsed = parseOperation(operation, opPath, errors);
       if (parsed) operations.push(parsed);
     });
     devices.push({ id: String(device.id), operations });
   });
 
+  if (errors.length === 0) {
+    errors.push(...checkReferences(callers, devices));
+  }
   if (errors.length > 0) return { ok: false, errors };
   return {
     ok: true,
-    policy: structuredClone({
+    policy: {
       version: input.version as number,
       callers,
       devices,
-    }),
+    },
   };
 }
 
-export function blockedOperation(name: string): boolean {
-  return BLOCKED_NAMES.has(name);
+function checkReferences(
+  callers: readonly CallerGrant[],
+  devices: readonly PolicyDevice[],
+): PolicyError[] {
+  const errors: PolicyError[] = [];
+  const byId = new Map(devices.map((device) => [device.id, device]));
+  callers.forEach((caller, callerIndex) => {
+    caller.allow.forEach((grant, grantIndex) => {
+      const grantPath = `callers[${callerIndex}].allow[${grantIndex}]`;
+      const device = byId.get(grant.deviceId);
+      if (!device) {
+        errors.push({
+          path: `${grantPath}.deviceId`,
+          message: "device is not defined",
+        });
+        return;
+      }
+      const names = new Set(device.operations.map((op) => op.name));
+      grant.operations.forEach((name, opIndex) => {
+        if (!names.has(name)) {
+          errors.push({
+            path: `${grantPath}.operations[${opIndex}]`,
+            message: "operation is not defined on this device",
+          });
+        }
+      });
+    });
+  });
+  devices.forEach((device, deviceIndex) => {
+    device.operations.forEach((operation, opIndex) => {
+      const required = operation.requiresState;
+      if (!required) return;
+      const target = device.operations.find(
+        (op) => op.name === required.output,
+      );
+      const base = `devices[${deviceIndex}].operations[${opIndex}].requiresState`;
+      if (!target) {
+        errors.push({
+          path: `${base}.output`,
+          message: "operation is not defined on this device",
+        });
+        return;
+      }
+      if (target.value === "boolean" && typeof required.equals !== "boolean") {
+        errors.push({
+          path: `${base}.equals`,
+          message: "must be a boolean for a boolean output",
+        });
+      } else if (
+        target.value !== "boolean" &&
+        (typeof required.equals !== "number" ||
+          required.equals < target.value.min ||
+          required.equals > target.value.max)
+      ) {
+        errors.push({
+          path: `${base}.equals`,
+          message: `must be a number from ${target.value.min} to ${target.value.max}`,
+        });
+      }
+    });
+  });
+  return errors;
 }
 
 function parseOperation(
@@ -190,11 +301,7 @@ function parseOperation(
       path,
     ),
   );
-  if (
-    typeof input.name !== "string" ||
-    !NAME.test(input.name) ||
-    BLOCKED_NAMES.has(input.name)
-  ) {
+  if (typeof input.name !== "string" || !NAME.test(input.name)) {
     errors.push({
       path: `${path}.name`,
       message: "must be a lowercase operation name",
@@ -206,6 +313,7 @@ function parseOperation(
       message: 'must be "read" or "actuate"',
     });
   }
+  const access = input.access as "read" | "actuate" | undefined;
   let value: PolicyOperation["value"] | undefined;
   if (input.value === "boolean") value = "boolean";
   else if (isRecord(input.value)) {
@@ -233,13 +341,29 @@ function parseOperation(
       message: "must be boolean or a finite number range",
     });
   }
-  if (
-    input.maxActiveMs !== undefined &&
-    !isPositiveInt(input.maxActiveMs, 86_400_000)
-  ) {
+  let maxActiveMs: number | "unlimited" | undefined;
+  if (input.maxActiveMs === "unlimited") {
+    maxActiveMs = "unlimited";
+  } else if (input.maxActiveMs !== undefined) {
+    if (!isPositiveInt(input.maxActiveMs, 86_400_000)) {
+      errors.push({
+        path: `${path}.maxActiveMs`,
+        message: 'must be an integer from 1 to 86400000, or "unlimited"',
+      });
+    } else {
+      maxActiveMs = input.maxActiveMs;
+    }
+  }
+  if (access === "actuate" && input.maxActiveMs === undefined) {
     errors.push({
       path: `${path}.maxActiveMs`,
-      message: "must be an integer from 1 to 86400000",
+      message: 'is required: an integer from 1 to 86400000, or "unlimited"',
+    });
+  }
+  if (access === "read" && input.maxActiveMs !== undefined) {
+    errors.push({
+      path: `${path}.maxActiveMs`,
+      message: "does not apply to a read operation",
     });
   }
   if (
@@ -251,31 +375,53 @@ function parseOperation(
       message: "must be an integer from 1 to 600",
     });
   }
-  if (
-    input.requiresState !== undefined &&
-    typeof input.requiresState !== "boolean" &&
-    (typeof input.requiresState !== "number" ||
-      !Number.isFinite(input.requiresState))
-  ) {
-    errors.push({
-      path: `${path}.requiresState`,
-      message: "must be a boolean or finite number",
-    });
+  let requiresState: StateRequirement | undefined;
+  if (input.requiresState !== undefined) {
+    requiresState = parseRequirement(input.requiresState, path, errors);
   }
   if (!value || hasError(errors, path)) return undefined;
   return {
     name: String(input.name),
-    access: input.access as "read" | "actuate",
+    access: access as "read" | "actuate",
     value,
-    ...(input.maxActiveMs !== undefined
-      ? { maxActiveMs: input.maxActiveMs as number }
-      : {}),
+    ...(maxActiveMs !== undefined ? { maxActiveMs } : {}),
     ...(input.maxPerMinute !== undefined
       ? { maxPerMinute: input.maxPerMinute as number }
       : {}),
-    ...(input.requiresState !== undefined
-      ? { requiresState: input.requiresState as boolean | number }
-      : {}),
+    ...(requiresState ? { requiresState } : {}),
+  };
+}
+
+function parseRequirement(
+  input: unknown,
+  path: string,
+  errors: PolicyError[],
+): StateRequirement | undefined {
+  const where = `${path}.requiresState`;
+  if (!isRecord(input)) {
+    errors.push({ path: where, message: "must be an object" });
+    return undefined;
+  }
+  errors.push(...unknown(input, ["output", "equals"], where));
+  if (typeof input.output !== "string" || !NAME.test(input.output)) {
+    errors.push({
+      path: `${where}.output`,
+      message: "must be a lowercase operation name",
+    });
+  }
+  if (
+    typeof input.equals !== "boolean" &&
+    (typeof input.equals !== "number" || !Number.isFinite(input.equals))
+  ) {
+    errors.push({
+      path: `${where}.equals`,
+      message: "must be a boolean or finite number",
+    });
+  }
+  if (hasError(errors, where)) return undefined;
+  return {
+    output: input.output as string,
+    equals: input.equals as boolean | number,
   };
 }
 
@@ -311,6 +457,6 @@ function fail(path: string, message: string): PolicyResult {
   return { ok: false, errors: [{ path, message }] };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

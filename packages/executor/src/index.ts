@@ -6,8 +6,8 @@
  * journal (#10), and ownership/serialization rules (#11). Adapters are
  * loaded here, never in the agent process.
  *
- * Scaffold only: the dispatch path, journal, and policy engine are
- * implemented by their owning issues.
+ * The policy engine checks every request here. The dispatch path and
+ * journal stay with their own issues.
  */
 import type { ActionOutcome } from "@november/core";
 
@@ -33,13 +33,24 @@ export function executorStatus(): ExecutorStatus {
   };
 }
 
-export { modelProcessOpen, modelProcessShell } from "./boundary.js";
-export { parsePolicy, blockedOperation } from "./policy.js";
-export type { PolicyDocument, PolicyOperation } from "./policy.js";
+export { parsePolicy } from "./policy.js";
+export type {
+  PolicyDevice,
+  PolicyDocument,
+  PolicyOperation,
+  StateRequirement,
+} from "./policy.js";
 export { createExecutionService } from "./service.js";
 export type {
+  ApprovalResult,
+  DeviceObservation,
+  DeviceObserver,
+  DeviceReader,
+  EffectOutcome,
+  ExecutionEffect,
   ExecutionRequest,
   ExecutionResult,
   ExecutionService,
   ServiceMode,
+  ValidatedAction,
 } from "./service.js";

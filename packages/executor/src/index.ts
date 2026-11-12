@@ -32,3 +32,14 @@ export function executorStatus(): ExecutorStatus {
     protocolVersion: EXECUTOR_PROTOCOL_VERSION,
   };
 }
+
+export { modelProcessOpen, modelProcessShell } from "./boundary.js";
+export { parsePolicy, blockedOperation } from "./policy.js";
+export type { PolicyDocument, PolicyOperation } from "./policy.js";
+export { createExecutionService } from "./service.js";
+export type {
+  ExecutionRequest,
+  ExecutionResult,
+  ExecutionService,
+  ServiceMode,
+} from "./service.js";

@@ -8,3 +8,16 @@
  */
 export { listSimulatedDevices } from "./simulated.js";
 export type { SimulatedDevice } from "./simulated.js";
+export {
+  MAX_FRAME_BYTES,
+  SERIAL_VERSION,
+  createFrameParser,
+  encodeFrame,
+  openSerialLink,
+} from "./serial.js";
+export type {
+  BytePipe,
+  SerialLink,
+  SerialMessage,
+  SerialResult,
+} from "./serial.js";

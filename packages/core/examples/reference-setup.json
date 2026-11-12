@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "devices": [
+    {
+      "id": "host-led",
+      "transport": { "type": "gpio", "chip": "gpiochip0", "line": 17 },
+      "operations": [
+        {
+          "name": "set",
+          "access": "actuate",
+          "value": { "type": "boolean" },
+          "maxActiveMs": "unlimited"
+        }
+      ],
+      "safeState": { "operation": "set", "value": false }
+    },
+    {
+      "id": "host-button",
+      "transport": {
+        "type": "gpio",
+        "chip": "gpiochip0",
+        "line": 27,
+        "activeLow": true,
+        "bias": "pull-up"
+      },
+      "operations": [
+        { "name": "pressed", "access": "read", "value": { "type": "boolean" } }
+      ]
+    },
+    {
+      "id": "bme280",
+      "transport": { "type": "i2c", "bus": 1, "address": 118 },
+      "operations": [
+        {
+          "name": "temperature",
+          "access": "read",
+          "value": { "type": "number", "unit": "degC", "min": -40, "max": 85 }
+        },
+        {
+          "name": "pressure",
+          "access": "read",
+          "value": { "type": "number", "unit": "hPa", "min": 300, "max": 1100 }
+        },
+        {
+          "name": "humidity",
+          "access": "read",
+          "value": { "type": "number", "unit": "%RH", "min": 0, "max": 100 }
+        }
+      ]
+    },
+    {
+      "id": "spi-loopback",
+      "transport": {
+        "type": "spi",
+        "bus": 0,
+        "chipSelect": 0,
+        "mode": 0,
+        "maxSpeedHz": 1000000
+      },
+      "operations": [
+        {
+          "name": "transfer",
+          "access": "transfer",
+          "value": { "type": "bytes", "maxLength": 32 }
+        }
+      ]
+    }
+  ]
+}

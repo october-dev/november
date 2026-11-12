@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "packages/core" },
+    { "path": "packages/agent" },
     { "path": "packages/adapters" },
     { "path": "packages/executor" },
     { "path": "packages/cli" },

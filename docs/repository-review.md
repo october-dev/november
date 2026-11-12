@@ -29,3 +29,7 @@ No prohibited content was found within the reviewed file contents. This review d
 A maintainer must approve Apache 2.0 adoption, the contribution/security policies, and this review in the #3 pull request before implementation contributions are accepted. That approval is separate evidence; this record does not assert it has occurred.
 
 Contributors must preserve third-party licenses and required notices under [Reuse and attribution](../CONTRIBUTING.md#reuse-and-attribution). Repeat the content/license review when adding dependencies, copied material, fixtures, or generated files. [#4](https://github.com/october-dev/november/issues/4) owns package/dependency setup; [#24](https://github.com/october-dev/november/issues/24) owns inspection of actual package contents and required notices; [#29](https://github.com/october-dev/november/issues/29) owns the final release-content review. No future package is approved by this initial source review.
+
+## Dependency added for the agent loop
+
+Issue #5 adds direct dependencies `@earendil-works/pi-agent-core` 1.5.2 and `@earendil-works/pi-ai` 1.5.2 (MIT, Copyright (c) 2025 Mario Zechner, source https://github.com/earendil-works/pi). The notice is in `packages/agent/NOTICE`. The adapter does not call pi-ai's provider SDK clients. Install scripts for the transitive packages `@google/genai` and `protobufjs` are explicitly disabled in `pnpm-workspace.yaml`. This note is not a release-archive review; #24 still has to inspect the packaged tree.

@@ -17,5 +17,6 @@ export type {
   RecordedInput,
   RigClock,
   RigConfig,
+  RigOptions,
   RigResult,
 } from "./rig.js";

@@ -8,3 +8,14 @@
  */
 export { listSimulatedDevices } from "./simulated.js";
 export type { SimulatedDevice } from "./simulated.js";
+export { createClock, createFailureRig, replayRecording } from "./rig.js";
+export type {
+  AdapterChoice,
+  DeviceSelection,
+  FailureRig,
+  Fault,
+  RecordedInput,
+  RigClock,
+  RigConfig,
+  RigResult,
+} from "./rig.js";

@@ -166,6 +166,7 @@ For the full details, see the [threat model](docs/threat-model.md) and the [safe
 - The code is split into packages (see [Development](#development)).
 - Automatic checks (CI) run formatting, type checks, tests, a build and a smoke test on every change, on both x64 and arm64 machines.
 - A first command-line tool, `november`, can print its version and run `november doctor`, which reports the Node.js version, package versions and the simulated devices.
+- A failure rig can run those simulated devices on a fake clock, inject faults, and replay a recording. It cannot open real hardware.
 - The list of action results is fixed: `rejected`, `queued`, `dispatched`, `confirmed`, `failed`, `cancelled-before-dispatch` and `unknown`.
 - Design documents: [support matrix](docs/support-matrix.md), [release gates](docs/release-gates.md) and [threat model](docs/threat-model.md).
 

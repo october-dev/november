@@ -1,11 +1,28 @@
 <div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/header/logo-dark.svg">
+    <img src="assets/header/logo-light.svg" alt="november" width="560">
+  </picture>
+  <br>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/header/tagline-dark.svg">
+    <img src="assets/header/tagline-light.svg" alt="Let your agent use your hardware." width="520">
+  </picture>
+</div>
 
-<img src="assets/november-banner.svg" alt="November" width="1080">
+---
 
-<h1>November</h1>
+<p>
+  <a href="https://www.november.bot/"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/header/button-site-dark.svg"><img src="assets/header/button-site-light.svg" alt="Website" height="40" align="top"></picture></a>
+  <a href="docs/support-matrix.md"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/header/button-hardware-dark.svg"><img src="assets/header/button-hardware-light.svg" alt="Hardware" height="40" align="top"></picture></a>
+  <a href="#safety-rules"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/header/button-safety-dark.svg"><img src="assets/header/button-safety-light.svg" alt="Safety rules" height="40" align="top"></picture></a>
+  <a href="CONTRIBUTING.md"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/header/button-contribute-dark.svg"><img src="assets/header/button-contribute-light.svg" alt="Contribute" height="40" align="top"></picture></a>
+  <a href="#status-and-roadmap"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/header/callout-dark.svg"><img src="assets/header/callout-light.svg" alt="In development: build it from source, no real hardware yet." height="40" align="top"></picture></a>
+</p>
 
-<p><strong>An agentic harness for hardware.</strong><br>
-Let an AI agent read sensors, switch things on and off, and talk to small boards, with safety checks it cannot get around.</p>
+---
+
+**An agentic harness for hardware.** Let an AI agent read sensors, switch things on and off, and talk to small boards, with safety checks it cannot get around.
 
 <p>
 <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
@@ -13,11 +30,7 @@ Let an AI agent read sensors, switch things on and off, and talk to small boards
 <a href="https://github.com/october-dev/november/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/october-dev/november/actions/workflows/ci.yml/badge.svg?branch=main"></a>
 </p>
 
-<p><a href="https://www.november.bot/">Website</a> · <a href="docs/support-matrix.md">Supported hardware</a> · <a href="docs/release-gates.md">Release gates</a> · <a href="docs/threat-model.md">Threat model</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
-
-</div>
-
----
+<p><a href="docs/release-gates.md">Release gates</a> · <a href="docs/threat-model.md">Threat model</a></p>
 
 > [!IMPORTANT]
 > **November is in development.** Nothing is published to install yet. Most of the features below are **planned**, not finished. You can build the code from source (see [Development](#development)), but today it only checks its own setup and lists pretend devices. It does not control real hardware yet.

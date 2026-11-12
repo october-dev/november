@@ -206,13 +206,19 @@ November should work without an October account and let you choose your own AI m
 
 ## Development
 
-You need **Node.js 24 or newer** and **pnpm 11**. Running `corepack enable` sets up both at the versions pinned in this repo.
+You need **Node.js 24 or newer** and **pnpm 11**. Running `corepack enable` sets up both at the versions pinned in this repo. The test suite also compiles the reference-firmware host simulation, so you need a C compiler on `PATH` as `gcc` (any `gcc -std=c11 -Wall -Wextra -Werror` build works, including Apple Clang).
 
 ```bash
 pnpm install   # install pinned dependencies (committed lockfile)
 pnpm build     # typecheck and compile all packages
 pnpm test      # unit and simulator tests; no hardware, network, or model account
 pnpm smoke     # run the built CLI and package entry points
+```
+
+To run only the firmware host test:
+
+```bash
+gcc -std=c11 -Wall -Wextra -Werror -o /tmp/protect-test firmware/reference/protect.c firmware/reference/test_protect.c && /tmp/protect-test
 ```
 
 Other scripts in [`package.json`](package.json): `pnpm typecheck`, `pnpm format`, `pnpm format:check` and `pnpm clean`.

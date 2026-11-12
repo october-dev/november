@@ -2,11 +2,30 @@
  * Credential references for the execution service (issue #9).
  *
  * Values are loaded from an env name or a mode-0600 file. They are not
- * accepted as literals, not returned to the model purpose when they belong
- * to hardware, and not copied into errors. Replacing a value keeps the same
- * purpose and the same project/device scope.
+ * accepted as literals, not returned to the wrong purpose, and not copied
+ * into errors. An empty value after line-ending normalization counts as
+ * missing, matching the environment behavior.
+ *
+ * The configured source is the authority for the credential lifecycle:
+ * rotate by securely replacing the file, revoke locally by removing it.
+ * Both take effect on the next read and survive store reconstruction.
+ * Changes to external environment configuration require restarting with
+ * the new environment. Removing a local credential does not revoke a
+ * previously issued provider/broker credential.
+ *
+ * Purpose, project, and device checks are consistency guards, not caller
+ * authentication: this helper does not verify processes or local clients.
+ * Real isolation (separate OS access per process, authenticated callers)
+ * and destination enforcement remain integration work, as does TLS
+ * verification against the actual connection.
  */
-import { readFileSync, statSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  openSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
 
 export type SecretPurpose = "model" | "hardware";
 
@@ -28,33 +47,69 @@ export type SecretResult =
 const ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 const SCOPE = /^[a-z][a-z0-9-]{0,63}$/;
 
+function checkRef(ref: SecretRef): string | undefined {
+  if (ref.kind === "env") {
+    if (!ENV_NAME.test(ref.name)) return "environment secret name is invalid";
+    return undefined;
+  }
+  if (ref.path.includes("\0")) return "credential file path is invalid";
+  if (!ref.path.startsWith("/")) {
+    return "credential file must be an absolute path";
+  }
+  if (ref.path.split("/").includes("..")) {
+    return "credential file path must not contain ..";
+  }
+  return undefined;
+}
+
 export function parseSecretRef(
   input: string,
 ): { ok: true; ref: SecretRef } | { ok: false; detail: string } {
   if (input.startsWith("env:")) {
-    const name = input.slice(4);
-    if (!ENV_NAME.test(name))
-      return { ok: false, detail: "environment secret name is invalid" };
-    return { ok: true, ref: { kind: "env", name } };
+    const ref: SecretRef = { kind: "env", name: input.slice(4) };
+    const invalid = checkRef(ref);
+    if (invalid) return { ok: false, detail: invalid };
+    return { ok: true, ref };
   }
   if (input.startsWith("file:")) {
-    const path = input.slice(5);
-    if (!path.startsWith("/") || path.split("/").includes("..")) {
-      return { ok: false, detail: "credential file must be an absolute path" };
-    }
-    return { ok: true, ref: { kind: "file", path } };
+    const ref: SecretRef = { kind: "file", path: input.slice(5) };
+    const invalid = checkRef(ref);
+    if (invalid) return { ok: false, detail: invalid };
+    return { ok: true, ref };
   }
   return { ok: false, detail: "credential must be an env: or file: reference" };
 }
 
+/**
+ * Redact every nonempty secret occurrence in the original text, whatever
+ * their lengths, overlaps, or list order. Contiguous covered spans merge
+ * into one marker.
+ */
 export function redactSecrets(
   text: string,
   secrets: readonly string[],
 ): string {
-  let redacted = text;
+  const covered = new Array<boolean>(text.length).fill(false);
   for (const secret of secrets) {
-    if (secret.length < 4) continue;
-    redacted = redacted.split(secret).join("[redacted]");
+    if (secret.length === 0) continue;
+    let from = 0;
+    for (;;) {
+      const found = text.indexOf(secret, from);
+      if (found === -1) break;
+      for (let i = found; i < found + secret.length; i += 1) covered[i] = true;
+      from = found + 1;
+    }
+  }
+  let redacted = "";
+  let i = 0;
+  while (i < text.length) {
+    if (!covered[i]) {
+      redacted += text[i];
+      i += 1;
+      continue;
+    }
+    redacted += "[redacted]";
+    while (i < text.length && covered[i]) i += 1;
   }
   return redacted;
 }
@@ -66,23 +121,37 @@ export interface SecretStore {
     readonly projectId: string;
     readonly deviceId: string;
   }): SecretResult;
-  revoke(ref: SecretRef): void;
-  /** Point the same reference at a new value without changing who may use it. */
-  replace(ref: SecretRef, value: string): void;
 }
 
 export function createSecretStore(
   records: readonly SecretRecord[],
   options: {
     readonly env?: Readonly<Record<string, string | undefined>>;
-    readonly readFile?: (path: string) => string;
   } = {},
 ): SecretStore {
-  const env = options.env ?? process.env;
-  const readFile = options.readFile ?? readRestrictedFile;
-  const revoked = new Set<string>();
-  const replacements = new Map<string, string>();
-  const known = records.map((record) => ({ ...record }));
+  const env = { ...(options.env ?? process.env) };
+  // Snapshot each record including its nested reference, so later caller
+  // mutations cannot widen the grant. Reject ambiguous or invalid
+  // configuration up front instead of failing closed per read.
+  const seenRefs = new Set<string>();
+  const known = records.map((record) => {
+    if (!SCOPE.test(record.projectId) || !SCOPE.test(record.deviceId)) {
+      throw new Error("credential scope is invalid");
+    }
+    const invalid = checkRef(record.ref);
+    if (invalid) throw new Error(invalid);
+    const key = refKey(record.ref);
+    if (seenRefs.has(key)) {
+      throw new Error("credential reference is configured twice");
+    }
+    seenRefs.add(key);
+    return {
+      ref: { ...record.ref },
+      purpose: record.purpose,
+      projectId: record.projectId,
+      deviceId: record.deviceId,
+    };
+  });
 
   return {
     get(input) {
@@ -103,46 +172,75 @@ export function createSecretStore(
           detail: "credential is not available to this project or device",
         };
       }
-      if (revoked.has(refKey(input.ref)))
-        return { ok: false, detail: "credential has been revoked" };
-      const replaced = replacements.get(refKey(input.ref));
-      if (replaced !== undefined) return { ok: true, value: replaced };
       try {
         if (input.ref.kind === "env") {
           const value = env[input.ref.name];
           if (!value) return { ok: false, detail: "credential is missing" };
           return { ok: true, value };
         }
-        return { ok: true, value: readFile(input.ref.path) };
+        return { ok: true, value: readRestrictedFile(input.ref.path) };
       } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "credential could not be read";
-        return {
-          ok: false,
-          detail: redactSecrets(message, [...replacements.values()]),
-        };
+        return { ok: false, detail: fileFailureDetail(error) };
       }
-    },
-    revoke(ref) {
-      revoked.add(refKey(ref));
-    },
-    replace(ref, value) {
-      if (value.length === 0)
-        throw new Error("replacement credential is empty");
-      replacements.set(refKey(ref), value);
-      revoked.delete(refKey(ref));
     },
   };
 }
 
+function fileFailureDetail(error: unknown): string {
+  if (error instanceof RestrictedFileError) return error.detail;
+  if (isErrno(error, "ENOENT")) return "credential is missing";
+  if (isErrno(error, "EACCES") || isErrno(error, "EPERM")) {
+    return "credential file permission denied";
+  }
+  return "credential file cannot be read";
+}
+
+function isErrno(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code: unknown }).code === code
+  );
+}
+
+class RestrictedFileError extends Error {
+  readonly detail: string;
+  constructor(detail: string) {
+    super(detail);
+    this.detail = detail;
+  }
+}
+
 function readRestrictedFile(path: string): string {
-  const stat = statSync(path);
-  if (!stat.isFile()) throw new Error("credential file is missing");
-  if ((stat.mode & 0o077) !== 0)
-    throw new Error("credential file permissions are too open");
-  return readFileSync(path, "utf8").replace(/\n$/, "");
+  // Reject obviously unsuitable paths before opening, so a FIFO can never
+  // block the open. The opened descriptor is re-verified below.
+  const pre = statSync(path);
+  if (!pre.isFile()) {
+    throw new RestrictedFileError("credential file is not a regular file");
+  }
+  const fd = openSync(path, "r");
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.ino !== pre.ino || stat.dev !== pre.dev) {
+      throw new RestrictedFileError("credential file is not a regular file");
+    }
+    if ((stat.mode & 0o077) !== 0) {
+      throw new RestrictedFileError("credential file permissions are too open");
+    }
+    const contents = readFileSync(fd, "utf8");
+    // Strip exactly one trailing line ending (LF or CRLF); anything else,
+    // including further newlines, is part of the secret.
+    const value = contents.endsWith("\n")
+      ? contents.slice(0, contents.endsWith("\r\n") ? -2 : -1)
+      : contents;
+    if (value.length === 0) {
+      throw new RestrictedFileError("credential is missing");
+    }
+    return value;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function sameRef(left: SecretRef, right: SecretRef): boolean {
@@ -154,39 +252,43 @@ function refKey(ref: SecretRef): string {
 }
 
 /**
- * A hosted destination must be explicit and https, except a loopback test
- * server. A failed certificate check refuses the connection before any
- * device data is sent.
+ * HTTP(S) destination policy check on trusted caller inputs: the URL must
+ * be explicit and credential-free, plaintext HTTP is allowed only for
+ * loopback, and the caller reports the certificate result. This validates
+ * policy, not a live connection; MQTT destinations and real TLS
+ * verification belong with the connecting code.
  */
 export function checkEndpoint(
   baseUrl: string,
   options: {
-    readonly purpose: "model" | "telemetry";
     readonly explicit: boolean;
     readonly certificateValid: boolean;
   },
 ):
   | { readonly ok: true; readonly url: string }
   | { readonly ok: false; readonly detail: string } {
-  if (!options.explicit)
+  if (!options.explicit) {
     return { ok: false, detail: "destination was not explicitly configured" };
+  }
   let url: URL;
   try {
     url = new URL(baseUrl);
   } catch {
     return { ok: false, detail: "destination is not a URL" };
   }
-  if (url.username || url.password)
+  if (url.username || url.password) {
     return { ok: false, detail: "destination must not embed credentials" };
-  const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost";
+  }
+  const loopback =
+    url.hostname === "127.0.0.1" ||
+    url.hostname === "localhost" ||
+    url.hostname === "::1" ||
+    url.hostname === "[::1]";
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
     return { ok: false, detail: "destination must use https" };
   }
   if (!options.certificateValid && url.protocol === "https:") {
     return { ok: false, detail: "destination certificate is invalid" };
-  }
-  if (options.purpose === "telemetry" && !options.explicit) {
-    return { ok: false, detail: "destination was not explicitly configured" };
   }
   return { ok: true, url: url.toString() };
 }

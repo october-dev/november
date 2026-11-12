@@ -1,0 +1,8 @@
+{
+  "source": { "deviceId": "bme280", "operation": "temperature" },
+  "timestampMs": 1000,
+  "freshnessMs": 10000,
+  "validity": "valid",
+  "value": 21.5,
+  "unit": "degC"
+}

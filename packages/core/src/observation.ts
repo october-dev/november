@@ -46,10 +46,11 @@ const FRESHNESS_MESSAGE =
 const VALUE_MESSAGE = "must be a boolean, a finite number, bytes, or null";
 const BYTES_MESSAGE = "must be base64-encoded bytes of at most 4096 bytes";
 
-const BASE64_PATTERN =
-  /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-
-/** 4096 raw bytes encode to 5464 base64 characters. */
+/**
+ * 4096 raw bytes encode to 5464 base64 characters ending in two padding
+ * characters. With less padding that length decodes to 4097 or 4098 bytes,
+ * so a value of this length must end in "==".
+ */
 const MAX_BASE64_LENGTH = 5464;
 
 const ObservationSourceSchema = z.strictObject({
@@ -60,9 +61,12 @@ const ObservationSourceSchema = z.strictObject({
 const BytesValueSchema = z.strictObject({
   type: z.literal("bytes"),
   base64: z
-    .string(says(BYTES_MESSAGE))
-    .regex(BASE64_PATTERN, says(BYTES_MESSAGE))
-    .max(MAX_BASE64_LENGTH, says(BYTES_MESSAGE)),
+    .base64(says(BYTES_MESSAGE))
+    .max(MAX_BASE64_LENGTH, says(BYTES_MESSAGE))
+    .refine(
+      (value) => value.length < MAX_BASE64_LENGTH || value.endsWith("=="),
+      { error: BYTES_MESSAGE },
+    ),
 });
 
 const ObservationValueSchema = z.union(

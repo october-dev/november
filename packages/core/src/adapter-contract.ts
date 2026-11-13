@@ -143,7 +143,7 @@ export async function checkAdapterContract(
   const again = await input.adapter.reconcile(input.actuate.commandId);
   if (again.commandId !== input.actuate.commandId)
     fail("reconcile did not echo the command id");
-  const latest = again.outcome;
+  let latest = again.outcome;
   if (executed.outcome === "unknown") {
     if (latest !== "unknown" && latest !== "confirmed" && latest !== "failed") {
       fail(`reconcile of an uncertain command returned ${latest}`);
@@ -153,6 +153,15 @@ export async function checkAdapterContract(
   }
   if (input.actuationCount() !== afterExecute)
     fail("reconcile actuated the device");
+
+  // Evidence may arrive after the reconcile above: a duplicate may move an
+  // uncertain command to confirmed or failed. A decided outcome stays put.
+  const acceptsLatestOutcome = (next: typeof latest): boolean => {
+    if (latest === "unknown" && (next === "confirmed" || next === "failed")) {
+      latest = next;
+    }
+    return next === latest;
+  };
 
   const missing = await input.adapter.reconcile("missing-command");
   if (missing.outcome !== "unknown")
@@ -165,7 +174,7 @@ export async function checkAdapterContract(
   const repeated = await input.adapter.execute(input.actuate, input.nowMs);
   if (repeated.commandId !== input.actuate.commandId)
     fail("repeated command did not echo the command id");
-  if (repeated.outcome !== latest)
+  if (!acceptsLatestOutcome(repeated.outcome))
     fail(
       "repeating a command id disagrees with the latest established outcome",
     );
@@ -178,7 +187,7 @@ export async function checkAdapterContract(
   const completed = await input.adapter.execute(input.actuate, input.nowMs);
   if (completed.commandId !== input.actuate.commandId)
     fail("completed command after close did not echo the command id");
-  if (completed.outcome !== latest)
+  if (!acceptsLatestOutcome(completed.outcome))
     fail("close changed a completed command's outcome");
   if (input.actuationCount() !== afterExecute)
     fail("completed command after close actuated the device");

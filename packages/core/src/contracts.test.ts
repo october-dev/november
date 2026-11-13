@@ -230,6 +230,23 @@ describe("observations and actions", () => {
       value: { type: "bytes", base64: "not base64!!" },
     });
     expect(bad.ok).toBe(false);
+
+    // 5464 base64 characters decode to 4096, 4097, or 4098 bytes by padding.
+    const boundaries: Array<[string, boolean]> = [
+      ["A".repeat(5462) + "==", true],
+      ["A".repeat(5463) + "=", false],
+      ["A".repeat(5464), false],
+    ];
+    for (const [base64, accepted] of boundaries) {
+      const boundary = parseObservation({
+        source: { deviceId: "spi-loopback", operation: "transfer" },
+        timestampMs: 2_000,
+        freshnessMs: 10_000,
+        validity: "valid",
+        value: { type: "bytes", base64 },
+      });
+      expect(boundary.ok, base64.slice(-4)).toBe(accepted);
+    }
   });
 
   it("shares identifier and unit rules with the device configuration", () => {
@@ -356,25 +373,31 @@ describe("adapter contract", () => {
     expect(adapter.actuationCount).toBe(1);
   });
 
-  it("reconciles an uncertain action to confirmed without a second actuation", async () => {
-    const adapter = scriptedAdapter({
-      executeOutcome: "unknown",
-      actuated: true,
-      reconcileOutcomes: ["unknown", "confirmed"],
-    });
-    const input = contractInput(adapter);
-    const failures = await checkAdapterContract(input);
-    expect(failures).toEqual([]);
-    // Execute actuated once; reconcile and the duplicate must not repeat it.
-    expect(adapter.actuationCount).toBe(1);
-    // Later evidence reconciles the same command to confirmed.
-    const updated = await adapter.reconcile(input.actuate.commandId);
-    expect(updated.outcome).toBe("confirmed");
-    expect(adapter.actuationCount).toBe(1);
-    const duplicate = await adapter.execute(input.actuate, input.nowMs);
-    expect(duplicate.outcome).toBe("confirmed");
-    expect(adapter.actuationCount).toBe(1);
-  });
+  it.each([false, true])(
+    "accepts evidence that confirms an uncertain action at a duplicate, without a second actuation (after close: %s)",
+    async (afterClose) => {
+      const adapter = scriptedAdapter({
+        executeOutcome: "unknown",
+        actuated: true,
+        // The checklist's own reconcile sees the first outcome. Evidence then
+        // arrives at the first duplicate, or only at the one sent after close.
+        reconcileOutcomes: afterClose
+          ? ["unknown", "unknown", "confirmed"]
+          : ["unknown", "confirmed"],
+        reconcileOnDuplicate: true,
+      });
+      const input = contractInput(adapter);
+      const failures = await checkAdapterContract(input);
+      expect(failures).toEqual([]);
+      // Execute actuated once; reconcile and the duplicates must not repeat it.
+      expect(adapter.actuationCount).toBe(1);
+      const updated = await adapter.reconcile(input.actuate.commandId);
+      expect(updated.outcome).toBe("confirmed");
+      const duplicate = await adapter.execute(input.actuate, input.nowMs);
+      expect(duplicate.outcome).toBe("confirmed");
+      expect(adapter.actuationCount).toBe(1);
+    },
+  );
 
   it("handles an evidenced failure without actuating", async () => {
     const adapter = scriptedAdapter({
@@ -560,6 +583,8 @@ function scriptedAdapter(options: {
   reconcileOutcomes: Array<"confirmed" | "failed" | "unknown">;
   ignoreDeviceIds?: boolean;
   malformedReadings?: boolean;
+  /** A duplicate looks for new evidence instead of echoing its outcome. */
+  reconcileOnDuplicate?: boolean;
 }): MemoryAdapter & { actuationCount: number } {
   let actuations = 0;
   let open = false;
@@ -605,7 +630,11 @@ function scriptedAdapter(options: {
     },
     execute: async (action) => {
       const prior = outcomes.get(action.commandId);
-      if (prior) return prior;
+      if (prior) {
+        return options.reconcileOnDuplicate
+          ? adapter.reconcile(action.commandId)
+          : prior;
+      }
       if (!open) {
         return {
           commandId: action.commandId,

@@ -6,7 +6,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
-  writeSync,
+  writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import type { ActionOutcome } from "@november/core";
@@ -184,7 +184,7 @@ function persistFile(filePath: string, body: string): void {
   const fd = openSync(temporary, "w", 0o600);
   try {
     fchmodSync(fd, 0o600);
-    writeSync(fd, body);
+    writeFileSync(fd, Buffer.from(body));
     fsyncSync(fd);
   } finally {
     closeSync(fd);

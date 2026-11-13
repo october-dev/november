@@ -667,7 +667,7 @@ describe("device agent loop", () => {
     expect(result.error).toMatch(/budget/);
   });
 
-  it("drops an oversized tool group instead of altering the call", async () => {
+  it("fails instead of continuing without this run's tool exchange", async () => {
     const agent = createDeviceAgent({
       projectId: "bench",
       deviceId: "led",
@@ -690,8 +690,9 @@ describe("device agent loop", () => {
       },
     });
     const result = await agent.run("go");
-    expect(result.status).toBe("completed");
-    expect(result.text).toBe("done");
+    expect(result.status).toBe("failed");
+    expect(result.error).toMatch(/budget/);
+    expect(result.hardwareSubmissions).toBe(1);
   });
 
   it("records unknown when cancellation interrupts submission and ignores the late reply", async () => {

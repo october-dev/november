@@ -3,13 +3,14 @@ import { estimateTokens, type AgentLimits } from "./limits.js";
 
 /**
  * Drop the oldest conversation groups until the transcript fits the context
- * budget. The leading system prompt and the current run's prompt (the most
- * recent user message) are required context: if they alone exceed a cap,
- * this throws instead of sending an oversized, broken, or prompt-less
- * request. Tool results stay attached to the assistant message that
- * requested them, so a trimmed transcript is still a valid provider
- * payload. Tool text is never copied into the system prompt, and tool
- * arguments are never altered to fake a fit.
+ * budget. The leading system prompt, the current run's prompt (the most
+ * recent user message), and this run's tool exchanges after it are required
+ * context: if they exceed a cap, this throws instead of sending an
+ * oversized, broken, or prompt-less request, or one that omits an action
+ * the agent just requested. Tool results stay attached to the assistant
+ * message that requested them, so a trimmed transcript is still a valid
+ * provider payload. Tool text is never copied into the system prompt, and
+ * tool arguments are never altered to fake a fit.
  */
 export function boundContext(
   messages: readonly AgentMessage[],
@@ -32,39 +33,26 @@ export function boundContext(
   const promptIndex = groups.findLastIndex((group) =>
     group.some((message) => message.role === "user"),
   );
-  // The system prompt and the current prompt (the most recent user
-  // message) can never be dropped. Everything else slides oldest-first.
+  // The system prompt, the current prompt (the most recent user message),
+  // and everything after it can never be dropped. Older groups slide
+  // oldest-first.
   const prompt: AgentMessage[] =
     promptIndex < 0 ? [] : (groups[promptIndex] ?? []);
   const before = promptIndex < 0 ? [...groups] : groups.slice(0, promptIndex);
   const after = promptIndex < 0 ? [] : groups.slice(promptIndex + 1);
-  const required = [...system, ...prompt];
+  const current = [...prompt, ...after.flat()];
+  const required = [...system, ...current];
   if (overBudget(required, limits)) {
     throw new Error(
-      "required context exceeds the budget: the system prompt and the current prompt cannot fit",
+      "required context exceeds the budget: the system prompt, the current prompt, and this run's tool exchanges cannot fit",
     );
   }
   const keptBefore = [...before];
-  const keptAfter = [...after];
-  const assembled = () => [
-    ...system,
-    ...keptBefore.flat(),
-    ...prompt,
-    ...keptAfter.flat(),
-  ];
+  const assembled = () => [...system, ...keptBefore.flat(), ...current];
   while (keptBefore.length > 0 && overBudget(assembled(), limits)) {
     keptBefore.shift();
   }
-  while (keptAfter.length > 0 && overBudget(assembled(), limits)) {
-    keptAfter.shift();
-  }
-  const bounded = assembled();
-  if (overBudget(bounded, limits)) {
-    throw new Error(
-      "required context exceeds the budget: the transcript cannot fit",
-    );
-  }
-  return bounded;
+  return assembled();
 }
 
 function groupMessages(messages: readonly AgentMessage[]): AgentMessage[][] {

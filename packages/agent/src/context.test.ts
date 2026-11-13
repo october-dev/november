@@ -153,6 +153,18 @@ describe("boundContext", () => {
     ).toBe(true);
   });
 
+  it("fails instead of dropping the current run's tool exchange", () => {
+    const messages: AgentMessage[] = [
+      { role: "system", content: "rules", timestamp: 1 },
+      user("newest"),
+      assistantWithCall("call-1", "a".repeat(4_000)),
+      toolResult("call-1", "result"),
+    ];
+    expect(() =>
+      boundContext(messages, resolveLimits({ maxContextTokens: 500 })),
+    ).toThrow(/budget/);
+  });
+
   it("rejects impossible and non-finite limit overrides", () => {
     expect(() => resolveLimits({ maxTurns: Number.NaN })).toThrow(RangeError);
     expect(() => resolveLimits({ maxSessionMessages: -1 })).toThrow(RangeError);

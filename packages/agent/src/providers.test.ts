@@ -148,6 +148,7 @@ describe("openai-compatible providers", () => {
         kind: "local-openai",
         baseUrl: "http://127.0.0.1:8080/v1",
         model: "local-test",
+        apiKey: "",
         fetch,
       },
     });
@@ -205,6 +206,31 @@ describe("openai-compatible providers", () => {
         },
       }),
     ).toThrow(/nonempty/);
+  });
+
+  it("leaves the hosted token field to Pi's per-endpoint detection", async () => {
+    const fetch = stubFetch(() => sseResponse(sseText("hosted ok")));
+    const agent = createDeviceAgent({
+      projectId: "bench",
+      deviceId: "led",
+      sessionDirectory: directory(),
+      execution: noHardware,
+      provider: {
+        kind: "hosted-openai",
+        baseUrl: "https://api.together.xyz/v1",
+        model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        apiKey: "synthetic-test-key",
+        fetch,
+      },
+    });
+    const result = await agent.run("hello");
+    expect(result.status).toBe("completed");
+    const body = JSON.parse(fetch.requests[0]?.body ?? "{}") as {
+      max_tokens?: number;
+      max_completion_tokens?: number;
+    };
+    expect(body.max_tokens).toBeGreaterThan(0);
+    expect(body.max_completion_tokens).toBeUndefined();
   });
 
   it("forwards accompanying text with multiple tool calls", async () => {

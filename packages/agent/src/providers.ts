@@ -118,6 +118,14 @@ export function modelFor(
   const id = selection.kind === "fake" ? "fake-fixture" : selection.model;
   const baseUrl =
     selection.kind === "fake" ? "http://127.0.0.1" : selection.baseUrl;
+  // Hosted endpoints keep Pi's per-endpoint detection unless the selection
+  // names a field; local servers default to max_tokens.
+  let maxTokensField: TokenField | undefined;
+  if (selection.kind !== "fake") {
+    maxTokensField =
+      selection.tokenField ??
+      (selection.kind === "local-openai" ? "max_tokens" : undefined);
+  }
   // The application budget, not a model window: November uses Pi's full
   // stream(), which never applies context-window margin math.
   return {
@@ -131,17 +139,7 @@ export function modelFor(
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: limits.maxContextTokens,
     maxTokens: limits.maxOutputTokens,
-    ...(selection.kind === "fake"
-      ? {}
-      : {
-          compat: {
-            maxTokensField:
-              selection.tokenField ??
-              (selection.kind === "local-openai"
-                ? "max_tokens"
-                : ("max_completion_tokens" as const)),
-          },
-        }),
+    ...(maxTokensField ? { compat: { maxTokensField } } : {}),
   };
 }
 
@@ -217,7 +215,7 @@ function runPiStream(
 ): AssistantMessageEventStream {
   const userSignal = options?.signal;
   const keyless = selection.kind === "local-openai" && !selection.apiKey;
-  const apiKey = selection.apiKey ?? KEYLESS_PLACEHOLDER_KEY;
+  const apiKey = selection.apiKey || KEYLESS_PLACEHOLDER_KEY;
   // Pi's SDK timeout clears after response headers, so an explicit
   // deadline covers the whole stream including the response body.
   const deadline = new AbortController();

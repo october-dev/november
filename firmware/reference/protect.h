@@ -16,7 +16,10 @@
  * event order. Duration expiry compares unsigned elapsed time against the
  * stored duration, so it is correct across the 32-bit wrap as long as time
  * only moves forward. Ticks must run often enough to observe the cutoff;
- * this model schedules nothing by itself.
+ * this model schedules nothing by itself. A tick that sees the last
+ * heartbeat expired forgets it, even while the output is off and without
+ * disarming; only another heartbeat makes admission possible again, so a
+ * full counter wrap cannot revive an old one.
  *
  * Admission rule: a command returns 1 only while armed, only when the
  * output is off, only with a valid ID the history can retain, and only

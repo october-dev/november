@@ -284,6 +284,28 @@ int main(void) {
     expect(!fresh.on, "wrap expiry case off after its deadline");
   }
 
+  /* An idle heartbeat that expired stays expired across a full counter wrap. */
+  {
+    const uint64_t end = (uint64_t)UINT32_MAX + 101u;
+    uint64_t elapsed;
+    november_led_init(&fresh, 17);
+    november_led_arm(&fresh);
+    november_led_heartbeat(&fresh, 0);
+    for (elapsed = 1000; elapsed < end; elapsed += 1000) {
+      november_led_tick(&fresh, (uint32_t)elapsed);
+    }
+    november_led_tick(&fresh, (uint32_t)end);
+    expect(fresh.armed && !fresh.on, "idle expiry stays armed and off");
+    expect(november_led_command(&fresh, "idle-wrap", 1000, 100) == 0,
+           "counter wrap cannot revive an expired heartbeat");
+    expect(!fresh.on && fresh.id_count == 0,
+           "expired heartbeat admission changes no output or history");
+    november_led_heartbeat(&fresh, 100);
+    expect(november_led_command(&fresh, "idle-wrap", 1000, 100) == 1,
+           "a real new heartbeat restores idle admission");
+    expect(fresh.on, "fresh heartbeat permits activation");
+  }
+
   november_led_init(&restarted, led.boot_id + 1);
   expect(!restarted.armed && !restarted.on, "reset starts disarmed");
   expect(restarted.boot_id != led.boot_id, "caller supplies the new boot id");

@@ -32,15 +32,20 @@ static void turn_off(NovemberLed *led) {
 /* Settle any elapsed duration or heartbeat cutoff at the caller's time.
  * Unsigned elapsed comparison keeps this correct across the 32-bit wrap.
  * Duration expiry is normal completion and stays armed; heartbeat loss
- * interrupts the action, so it also disarms until explicitly re-armed. */
+ * interrupts the action, so it also disarms until explicitly re-armed.
+ * An expired heartbeat is forgotten even while off, so a full counter
+ * wrap cannot make it look fresh again. */
 static void settle(NovemberLed *led, uint32_t now_ms) {
+  bool heartbeat_expired =
+      led->have_heartbeat &&
+      now_ms - led->last_heartbeat_ms >= NOVEMBER_HEARTBEAT_CUTOFF_MS;
+  if (heartbeat_expired) led->have_heartbeat = false;
   if (!led->on) return;
   if (now_ms - led->start_ms >= led->active_ms) {
     turn_off(led);
     return;
   }
-  if (led->have_heartbeat &&
-      now_ms - led->last_heartbeat_ms >= NOVEMBER_HEARTBEAT_CUTOFF_MS) {
+  if (heartbeat_expired) {
     turn_off(led);
     led->armed = false;
   }

@@ -8,25 +8,54 @@
  *
  * Ownership: claim() sets the owner. The same owner claiming again while
  * its lease is live renews it; a different owner is rejected until the
- * lease lapses. A claim never interrupts a running operation: while work
- * is marked running, even an expired lease cannot be claimed. Taking over
- * a device whose owner died mid-operation requires recover(), which waits
- * for a bounded inactivity window past lease expiry and consults the
- * optional fencing hook. Pair this with device-side fencing at
- * integration; the hook defaults to time-based inactivity only.
+ * lease lapses. An owner ID names one worker incarnation: a restarted
+ * worker MUST claim under a fresh ID. Reusing the previous incarnation's
+ * ID renews the old generation and hands the restarted worker the old
+ * generation, the running ticket via stop(), and the power to finish()
+ * it — bypassing recovery evidence entirely. Generations reject stale
+ * workers only when each incarnation uses its own ID.
+ *
+ * Recovery: recover() answers promptly and succeeds once reuse is proven
+ * safe; it returns a refusal (never silence) when it cannot prove that.
+ * For an occupied device, silence is never evidence: recovery requires
+ * the fencing hook to confirm the old owner stopped, after a bounded
+ * inactivity window past lease expiry. Without a configured fence,
+ * occupied recovery is refused. Takeover of an idle device after expiry
+ * needs no fence: the old owner holds no running ticket and its
+ * generation no longer gets one.
+ *
+ * The running ticket abandoned by recover() is returned separately in
+ * `abandoned`, never mixed into `cancelled`. Abandoned work may or may
+ * not have reached physical dispatch — submit() marks a ticket running
+ * before any caller/device work executes — so the action log and executor
+ * must establish its outcome from journal evidence, and must never
+ * auto-retry while that outcome is uncertain. `cancelled` holds only
+ * waits that never acquired the device.
  *
  * Work items: every accepted submit() returns a ticket. finish() must
  * name the running ticket, so a duplicate or late completion can never
  * release another command. Each request carries its own immutable
- * deadline; owner renewals never extend a queued request's wait, and
- * expired requests are skipped at dispatch and reported as cancelled.
- * The gate enforces only the per-device queue limit here; overall
- * pending-action caps, byte accounting, and rejection counters belong to
- * the integrated dispatch path.
+ * absolute latest-start instant (`deadlineAtMs`); owner renewals never
+ * extend a queued request's wait. Convert that instant from the original
+ * admission time plus the admission budget on the same monotonic clock,
+ * and never reset it when work moves between components: it bounds when
+ * work may start, not when it must complete. Expired waits are reclaimed
+ * on the next accepted submit() and reported in its `cancelled` list, or
+ * skipped at dispatch; a refusal never reclaims, so no ticket disappears
+ * without a report. The gate enforces only the per-device queue limit
+ * here; overall pending-action caps, byte accounting, and rejection
+ * counters belong to the integrated dispatch path.
  *
- * Policy: the caller supplies a check that runs at the moment an action
- * actually starts, both for direct starts and for work leaving the queue.
- * The gate implements no policy rules of its own.
+ * Policy: the caller supplies a pure eligibility predicate. It must be
+ * repeatable and side-effect free: the gate calls it at admission and
+ * again each time a queued request is considered at dispatch, and it may
+ * be called for requests that never run. It must never consume a grant or
+ * perform accounting. Authoritative per-request checks and usage
+ * accounting run in the executor before the physical effect, while the
+ * gate ticket is held. A capacity refusal never consults the hook. A
+ * throwing hook fails closed: at admission the submit is refused, and at
+ * dispatch the entry is dropped, reported in `cancelled` and
+ * `policyFailures`, while the rest of the queue keeps working.
  *
  * Stop: a stop request from the current owner clears queued work but keeps
  * the running operation occupied until its completion arrives or a
@@ -48,6 +77,17 @@ export type GateAccepted = {
   readonly started?: number;
   /** Tickets dropped by this call, oldest first. */
   readonly cancelled?: readonly number[];
+  /**
+   * Running ticket abandoned by recover(), when the device was occupied.
+   * It may or may not have reached physical dispatch; reconcile its
+   * outcome from journal evidence, never from this field alone.
+   */
+  readonly abandoned?: number;
+  /**
+   * Tickets dropped because the policy hook threw, oldest first. Every
+   * entry here also appears in `cancelled`.
+   */
+  readonly policyFailures?: readonly number[];
 };
 
 export type GateRejected = {
@@ -57,6 +97,8 @@ export type GateRejected = {
   readonly ticket?: undefined;
   readonly started?: undefined;
   readonly cancelled?: undefined;
+  readonly abandoned?: undefined;
+  readonly policyFailures?: undefined;
 };
 
 export type GateResult = GateAccepted | GateRejected;
@@ -79,7 +121,8 @@ interface Lease {
 interface Queued {
   readonly ticket: number;
   readonly kind: Exclude<GateKind, "stop">;
-  readonly deadlineMs: number;
+  /** Absolute latest-start instant on the caller's monotonic clock. */
+  readonly deadlineAtMs: number;
 }
 
 export interface ResourceGate {
@@ -97,7 +140,7 @@ export interface ResourceGate {
     generation: number,
     kind: GateKind,
     nowMs: number,
-    deadlineMs?: number,
+    deadlineAtMs?: number,
   ): GateResult;
   finish(
     deviceId: string,
@@ -117,21 +160,33 @@ export function createResourceGate(
   options: {
     readonly leaseMs?: number;
     readonly queueLimit?: number;
-    /** Default wait deadline for a request, measured from admission. */
+    /** Default wait budget for a request, measured from admission. */
     readonly maxWaitMs?: number;
     /** Extra inactivity past lease expiry before recover() may take over. */
     readonly recoveryMs?: number;
-    /** Runs at the moment an action actually starts. */
+    /**
+     * Pure eligibility predicate. Must be repeatable and side-effect
+     * free: it runs at admission and again at each dispatch
+     * consideration, including for requests that never run. Never
+     * consume a grant here; the executor performs authoritative checks
+     * and accounting before the physical effect while holding the
+     * ticket. A throw fails closed (refusal at admission, drop with a
+     * report at dispatch).
+     */
     readonly policy?: (
       deviceId: string,
       kind: Exclude<GateKind, "stop">,
       nowMs: number,
     ) => PolicyDecision;
     /**
-     * Confirms the previous worker is stopped before recover() takes over.
-     * When absent, recovery relies on the bounded inactivity window alone.
+     * Confirms the previous worker stopped before recover() takes over
+     * an occupied device. Receives the device and the generation the
+     * recovery would install, so device-side fencing can target it.
+     * Occupied recovery without a configured fence is refused; a
+     * refusal or a throw fails closed. Idle takeover consults it only
+     * when one is configured.
      */
-    readonly fence?: (deviceId: string) => boolean;
+    readonly fence?: (deviceId: string, nextGeneration: number) => boolean;
   } = {},
 ): ResourceGate {
   const leaseMs = options.leaseMs ?? 1_000;
@@ -179,30 +234,40 @@ export function createResourceGate(
   }
 
   // Start queued work after a completion: skip expired entries, re-check
-  // policy per entry, and report every dropped ticket to the caller.
+  // policy per entry, and report every dropped ticket to the caller. A
+  // throwing policy check drops only its own entry; the rest of the
+  // queue keeps working and earlier reports are preserved.
   function dispatch(
     deviceId: string,
     lease: Lease,
     nowMs: number,
-  ): { started?: number; cancelled: number[] } {
+  ): { started?: number; cancelled: number[]; policyFailures: number[] } {
     const queue = queueFor(deviceId);
     const cancelled: number[] = [];
+    const policyFailures: number[] = [];
     while (queue.length > 0) {
       const next = queue.shift();
       if (!next) break;
-      if (next.deadlineMs <= nowMs) {
+      if (next.deadlineAtMs <= nowMs) {
         cancelled.push(next.ticket);
         continue;
       }
-      const decision = policy(deviceId, next.kind, nowMs);
+      let decision: PolicyDecision;
+      try {
+        decision = policy(deviceId, next.kind, nowMs);
+      } catch {
+        cancelled.push(next.ticket);
+        policyFailures.push(next.ticket);
+        continue;
+      }
       if (!decision.allowed) {
         cancelled.push(next.ticket);
         continue;
       }
       lease.running = next.ticket;
-      return { started: next.ticket, cancelled };
+      return { started: next.ticket, cancelled, policyFailures };
     }
-    return { cancelled };
+    return { cancelled, policyFailures };
   }
 
   return {
@@ -224,7 +289,10 @@ export function createResourceGate(
         if (current.ownerId !== ownerId) {
           return rejected("device has a live owner");
         }
-        // Same owner while live: safe renewal, never a reset.
+        // Same owner while live: safe renewal, never a reset. This is
+        // why each worker incarnation needs a fresh ID: a restarted
+        // worker reusing its old ID would renew this generation instead
+        // of proving recovery safe.
         current.expiresAtMs = nowMs + leaseMs;
         return {
           accepted: true,
@@ -271,11 +339,24 @@ export function createResourceGate(
       if (lease.expiresAtMs + recoveryMs > nowMs) {
         return rejected("owner may still be active");
       }
-      if (fence && !fence(deviceId)) {
-        return rejected("fencing refused");
+      if (lease.running !== undefined && !fence) {
+        // Occupied and unfenced: silence is not evidence that the old
+        // operation ended, so reuse cannot be proven safe.
+        return rejected("fencing required");
       }
+      if (fence) {
+        let confirmed: boolean;
+        try {
+          confirmed = fence(deviceId, lease.generation + 1);
+        } catch {
+          return rejected("fencing failed");
+        }
+        if (!confirmed) {
+          return rejected("fencing refused");
+        }
+      }
+      const abandoned = lease.running;
       const cancelled: number[] = [];
-      if (lease.running !== undefined) cancelled.push(lease.running);
       for (const entry of queueFor(deviceId)) cancelled.push(entry.ticket);
       queueFor(deviceId).length = 0;
       const generation = lease.generation + 1;
@@ -287,10 +368,19 @@ export function createResourceGate(
         stopPending: false,
         nextTicket: lease.nextTicket,
       });
-      return { accepted: true, detail: "recovered", generation, cancelled };
+      if (abandoned === undefined) {
+        return { accepted: true, detail: "recovered", generation, cancelled };
+      }
+      return {
+        accepted: true,
+        detail: "recovered",
+        generation,
+        abandoned,
+        cancelled,
+      };
     },
 
-    submit(deviceId, ownerId, generation, kind, nowMs, deadlineMs) {
+    submit(deviceId, ownerId, generation, kind, nowMs, deadlineAtMs) {
       if (!Number.isFinite(nowMs)) return rejected("invalid time");
       const lease = leases.get(deviceId);
       if (!lease) return rejected("unknown device");
@@ -323,28 +413,66 @@ export function createResourceGate(
       if (lease.stopPending) {
         return rejected("stop pending");
       }
-      const deadline = deadlineMs ?? nowMs + maxWaitMs;
+      const deadline = deadlineAtMs ?? nowMs + maxWaitMs;
       if (!Number.isFinite(deadline) || deadline <= nowMs) {
         return rejected("invalid deadline");
       }
-      const decision = policy(deviceId, kind, nowMs);
+      if (lease.running !== undefined) {
+        const queue = queueFor(deviceId);
+        // Reclaim expired waits before the capacity check so a
+        // long-running operation cannot pin dead entries in a full
+        // queue. The prune commits only as part of an accepted submit;
+        // a refused submit leaves the queue untouched, so no ticket
+        // disappears without a report.
+        const live = queue.filter((entry) => entry.deadlineAtMs > nowMs);
+        if (live.length >= queueLimit) {
+          return rejected("queue is full");
+        }
+        let decision: PolicyDecision;
+        try {
+          decision = policy(deviceId, kind, nowMs);
+        } catch {
+          return rejected("policy check failed");
+        }
+        if (!decision.allowed) {
+          return rejected(
+            decision.reason
+              ? `policy denied: ${decision.reason}`
+              : "policy denied",
+          );
+        }
+        const cancelled = queue
+          .filter((entry) => entry.deadlineAtMs <= nowMs)
+          .map((entry) => entry.ticket);
+        queue.length = 0;
+        queue.push(...live);
+        const ticket = lease.nextTicket;
+        lease.nextTicket += 1;
+        queue.push({ ticket, kind, deadlineAtMs: deadline });
+        lease.expiresAtMs = nowMs + leaseMs;
+        if (cancelled.length === 0) {
+          return { accepted: true, detail: "queued", generation, ticket };
+        }
+        return {
+          accepted: true,
+          detail: "queued",
+          generation,
+          ticket,
+          cancelled,
+        };
+      }
+      let decision: PolicyDecision;
+      try {
+        decision = policy(deviceId, kind, nowMs);
+      } catch {
+        return rejected("policy check failed");
+      }
       if (!decision.allowed) {
         return rejected(
           decision.reason
             ? `policy denied: ${decision.reason}`
             : "policy denied",
         );
-      }
-      if (lease.running !== undefined) {
-        const queue = queueFor(deviceId);
-        if (queue.length >= queueLimit) {
-          return rejected("queue is full");
-        }
-        const ticket = lease.nextTicket;
-        lease.nextTicket += 1;
-        queue.push({ ticket, kind, deadlineMs: deadline });
-        lease.expiresAtMs = nowMs + leaseMs;
-        return { accepted: true, detail: "queued", generation, ticket };
       }
       const ticket = lease.nextTicket;
       lease.nextTicket += 1;
@@ -375,13 +503,37 @@ export function createResourceGate(
           cancelled: [],
         };
       }
-      const { started, cancelled } = dispatch(deviceId, lease, nowMs);
+      const { started, cancelled, policyFailures } = dispatch(
+        deviceId,
+        lease,
+        nowMs,
+      );
       if (started === undefined) {
+        if (policyFailures.length === 0) {
+          return {
+            accepted: true,
+            detail: "idle",
+            generation,
+            ticket,
+            cancelled,
+          };
+        }
         return {
           accepted: true,
           detail: "idle",
           generation,
           ticket,
+          cancelled,
+          policyFailures,
+        };
+      }
+      if (policyFailures.length === 0) {
+        return {
+          accepted: true,
+          detail: "started",
+          generation,
+          ticket,
+          started,
           cancelled,
         };
       }
@@ -392,6 +544,7 @@ export function createResourceGate(
         ticket,
         started,
         cancelled,
+        policyFailures,
       };
     },
 

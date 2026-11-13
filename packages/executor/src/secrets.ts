@@ -21,6 +21,7 @@
  */
 import {
   closeSync,
+  constants,
   fstatSync,
   openSync,
   readFileSync,
@@ -213,16 +214,15 @@ class RestrictedFileError extends Error {
 }
 
 function readRestrictedFile(path: string): string {
-  // Reject obviously unsuitable paths before opening, so a FIFO can never
-  // block the open. The opened descriptor is re-verified below.
-  const pre = statSync(path);
-  if (!pre.isFile()) {
+  // Reject known non-regular paths before opening. O_NONBLOCK prevents
+  // a FIFO swapped in afterward from blocking before descriptor checks.
+  if (!statSync(path).isFile()) {
     throw new RestrictedFileError("credential file is not a regular file");
   }
-  const fd = openSync(path, "r");
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.ino !== pre.ino || stat.dev !== pre.dev) {
+    if (!stat.isFile()) {
       throw new RestrictedFileError("credential file is not a regular file");
     }
     if ((stat.mode & 0o077) !== 0) {

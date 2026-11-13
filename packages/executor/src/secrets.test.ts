@@ -1,4 +1,10 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -274,7 +280,7 @@ describe("credentials", () => {
     });
   });
 
-  it("reports missing, non-regular, and unreadable files distinctly", () => {
+  it("reports missing and non-regular files distinctly", () => {
     withSecretFile("synthetic-file-secret\n", 0o600, (_file, directory) => {
       const absent = path.join(directory, "absent");
       const store = createSecretStore([
@@ -307,38 +313,50 @@ describe("credentials", () => {
         ),
       ).toBe("credential file is not a regular file");
     });
-    withSecretFile("synthetic-file-secret\n", 0o000, (file) => {
-      const store = createSecretStore([fileRecord(file)]);
-      expect(
-        failed(
-          store.get({
-            ref: { kind: "file", path: file },
-            purpose: "hardware",
-            projectId: "bench",
-            deviceId: "host-led",
-          }),
-        ),
-      ).toBe("credential file permission denied");
-      chmodSync(file, 0o600);
-    });
   });
+
+  // Ordinary root privileges bypass this fixture's read-permission denial.
+  it.skipIf(process.geteuid?.() === 0)(
+    "reports an unreadable file as permission denied",
+    () => {
+      withSecretFile("synthetic-file-secret\n", 0o000, (file) => {
+        const store = createSecretStore([fileRecord(file)]);
+        expect(
+          failed(
+            store.get({
+              ref: { kind: "file", path: file },
+              purpose: "hardware",
+              projectId: "bench",
+              deviceId: "host-led",
+            }),
+          ),
+        ).toBe("credential file permission denied");
+        chmodSync(file, 0o600);
+      });
+    },
+  );
 
   it("rotates and revokes through the source file across store reconstruction", () => {
     withSecretFile("first-secret\n", 0o600, (file) => {
       const open = () => createSecretStore([fileRecord(file)]);
-      const read = () =>
-        open().get({
+      const original = open();
+      const read = (store = original) =>
+        store.get({
           ref: { kind: "file", path: file },
           purpose: "hardware",
           projectId: "bench",
           deviceId: "host-led",
         });
       expect(valued(read())).toBe("first-secret");
-      writeFileSync(file, "second-secret\n");
-      chmodSync(file, 0o600);
+      const next = `${file}.next`;
+      writeFileSync(next, "second-secret\n");
+      chmodSync(next, 0o600);
+      renameSync(next, file);
       expect(valued(read())).toBe("second-secret");
+      expect(valued(read(open()))).toBe("second-secret");
       rmSync(file);
       expect(failed(read())).toBe("credential is missing");
+      expect(failed(read(open()))).toBe("credential is missing");
     });
   });
 

@@ -12,14 +12,18 @@
  * Every persist writes a temporary file, flushes it, renames it over the
  * journal, and flushes the containing directory. Files are private
  * (0600). The data directory must already exist; the journal never
- * creates it, so an unmounted location cannot look like first use.
+ * creates it. The service must verify that the intended filesystem is
+ * mounted there: an empty mount point still looks like first use.
  * Power-loss durability still needs filesystem/device qualification.
  *
- * Time comes from one caller-supplied millisecond clock for admission
- * and dispatch. Deadline comparisons are elapsed durations, so queued
- * records abandoned by a crash settle to cancelled-before-dispatch on
- * recovery and can never dispatch late, whatever the clock does across
- * a restart.
+ * Time comes from one monotonic millisecond clock for admission and
+ * dispatch: options.clock, or performance.now() in this process. An
+ * injected clock must be monotonic too, so a wall-clock change cannot
+ * extend a deadline. Admission readings are elapsed-time readings, not
+ * wall-clock timestamps. Deadline comparisons are elapsed durations, so
+ * queued records abandoned by a crash settle to
+ * cancelled-before-dispatch on recovery and can never dispatch late,
+ * whatever the clock does across a restart.
  *
  * One live journal owns each path: two instances would double-execute
  * and overwrite each other's records. The service must enforce that.
@@ -38,7 +42,7 @@ import {
   readFileSync,
   renameSync,
   statSync,
-  writeSync,
+  writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import { ACTION_OUTCOMES, type ActionOutcome } from "@november/core";
@@ -120,10 +124,11 @@ export function openJournal(
   options: {
     readonly crashAt?: CrashPoint;
     readonly write?: (path: string, body: string) => void;
+    /** Monotonic milliseconds, not wall time. Default: performance.now(). */
     readonly clock?: () => number;
   } = {},
 ): ActionJournal {
-  const clock = options.clock ?? Date.now;
+  const clock = options.clock ?? (() => performance.now());
   let blocked = false;
   let blockedReason: string | undefined;
   const records = new Map<string, StoredCommand>();
@@ -367,20 +372,18 @@ export function openJournal(
         return { outcome: "rejected", detail: invalid, effectRan: false };
       }
       const existing = records.get(command.commandId);
+      const canonical = canonicalize(command.payload);
+      if (existing && !sameIdentity(existing, command, canonical)) {
+        return {
+          outcome: "rejected",
+          detail: "command id was already used with different parameters",
+          effectRan: false,
+        };
+      }
       if (blocked) {
         return existing ? unavailableKnown(existing) : unavailableUnknown();
       }
-      const canonical = canonicalize(command.payload);
-      if (existing) {
-        if (!sameIdentity(existing, command, canonical)) {
-          return {
-            outcome: "rejected",
-            detail: "command id was already used with different parameters",
-            effectRan: false,
-          };
-        }
-        return knownResult(existing);
-      }
+      if (existing) return knownResult(existing);
       const stored: StoredCommand = {
         commandId: command.commandId,
         callerId: command.callerId,
@@ -424,6 +427,13 @@ export function openJournal(
         };
       }
       const stored = records.get(commandId);
+      if (stored && stored.callerId !== callerId) {
+        return {
+          outcome: "rejected",
+          detail: "caller does not own this command",
+          effectRan: false,
+        };
+      }
       if (blocked) {
         return stored ? unavailableKnown(stored) : unavailableUnknown();
       }
@@ -431,13 +441,6 @@ export function openJournal(
         return {
           outcome: "rejected",
           detail: "unknown command",
-          effectRan: false,
-        };
-      }
-      if (stored.callerId !== callerId) {
-        return {
-          outcome: "rejected",
-          detail: "caller does not own this command",
           effectRan: false,
         };
       }
@@ -482,6 +485,13 @@ export function openJournal(
         };
       }
       const stored = records.get(commandId);
+      if (stored && stored.callerId !== callerId) {
+        return {
+          outcome: "rejected",
+          detail: "caller does not own this command",
+          effectRan: false,
+        };
+      }
       if (blocked) {
         return stored ? unavailableKnown(stored) : unavailableUnknown();
       }
@@ -489,13 +499,6 @@ export function openJournal(
         return {
           outcome: "rejected",
           detail: "unknown command",
-          effectRan: false,
-        };
-      }
-      if (stored.callerId !== callerId) {
-        return {
-          outcome: "rejected",
-          detail: "caller does not own this command",
           effectRan: false,
         };
       }
@@ -590,7 +593,7 @@ function persist(
   const fd = openSync(temporary, "w", 0o600);
   try {
     fchmodSync(fd, 0o600);
-    writeSync(fd, body);
+    writeFileSync(fd, body);
     fsyncSync(fd);
   } finally {
     closeSync(fd);

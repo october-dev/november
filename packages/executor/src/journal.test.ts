@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   openJournal,
   type EffectOutcome,
@@ -10,6 +10,7 @@ import {
 
 const owned: string[] = [];
 afterEach(() => {
+  vi.restoreAllMocks();
   while (owned.length > 0) {
     rmSync(owned.pop() as string, { recursive: true, force: true });
   }
@@ -255,6 +256,26 @@ describe("action journal", () => {
     expect(applied).toBe(0);
   });
 
+  it("measures deadlines with the monotonic default clock", async () => {
+    const wall = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const monotonic = vi.spyOn(performance, "now").mockReturnValue(100);
+    const journal = openJournal(file());
+    journal.admit(command({ deadlineMs: 100 }));
+    wall.mockReturnValue(9_000);
+    monotonic.mockReturnValue(201);
+    let applied = 0;
+    expect(
+      await journal.dispatch("cmd-1", "dev", () => {
+        applied += 1;
+        return { outcome: "confirmed" };
+      }),
+    ).toMatchObject({
+      outcome: "cancelled-before-dispatch",
+      detail: "deadline expired before dispatch",
+    });
+    expect(applied).toBe(0);
+  });
+
   it("compares every caller-supplied identity field on id reuse", async () => {
     const journal = openJournal(file());
     journal.admit(command());
@@ -381,6 +402,22 @@ describe("action journal", () => {
     expect(journal.admit(command({ commandId: "cmd-3" }))).toMatchObject({
       outcome: "rejected",
       detail: "journal is unavailable; command history could not be checked",
+    });
+    expect(journal.admit(command({ operation: "toggle" }))).toMatchObject({
+      outcome: "rejected",
+      detail: "command id was already used with different parameters",
+    });
+    expect(
+      await journal.dispatch("cmd-1", "mallory", () => ({
+        outcome: "confirmed",
+      })),
+    ).toMatchObject({
+      outcome: "rejected",
+      detail: "caller does not own this command",
+    });
+    expect(journal.cancel("cmd-1", "mallory")).toMatchObject({
+      outcome: "rejected",
+      detail: "caller does not own this command",
     });
   });
 

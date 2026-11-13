@@ -58,9 +58,10 @@ describe("protected outputs", () => {
     duration.tick(40_000);
     expect(duration.on).toBe(false);
     expect(duration.armed).toBe(true);
+    duration.heartbeat(50_000);
     expect(
-      duration.command("cmd-3", PICO_MAX_ACTIVE_MS + 1, 50_000).accepted,
-    ).toBe(false);
+      duration.command("cmd-3", PICO_MAX_ACTIVE_MS + 1, 50_000).detail,
+    ).toMatch(/duration/);
   });
 
   it("cuts the output within 2s of the last heartbeat without a model call", () => {
@@ -106,11 +107,11 @@ describe("protected outputs", () => {
     led.heartbeat(0);
     expect(led.command("a", 30_000, 0).accepted).toBe(true);
     expect(led.on).toBe(true);
-    led.heartbeat(5000);
-    const busy = led.command("c", 1000, 5000);
+    led.heartbeat(1000);
+    const busy = led.command("c", 1000, 1000);
     expect(busy.accepted).toBe(false);
     expect(busy.detail).toBe("output is already on");
-    for (let t = 6000; t <= 29_000; t += 1000) {
+    for (let t = 2000; t <= 29_000; t += 1000) {
       led.heartbeat(t);
       led.tick(t);
     }
@@ -184,6 +185,30 @@ describe("protected outputs", () => {
     expired.tick(1000);
     expect(expired.on).toBe(false);
     expect(expired.armed).toBe(true);
+  });
+
+  it("settles elapsed limits before late events, including rejected commands", () => {
+    const cases = [
+      [1000, true], // Duration expires before heartbeat loss.
+      [2000, true], // Equal limits preserve normal completion.
+      [3000, false], // Heartbeat loss interrupts the action first.
+    ] as const;
+    for (const [activeMs, remainsArmed] of cases) {
+      for (const event of ["heartbeat", "tick", "command"] as const) {
+        const led = createPicoLed();
+        led.arm();
+        led.heartbeat(0);
+        expect(led.command("a", activeMs, 0).accepted).toBe(true);
+        expect(led.on).toBe(true);
+        if (event === "heartbeat") led.heartbeat(3500);
+        else if (event === "tick") led.tick(3500);
+        else {
+          expect(led.command("bad", 30_001, 3500).accepted).toBe(false);
+        }
+        expect(led.on).toBe(false);
+        expect(led.armed).toBe(remainsArmed);
+      }
+    }
   });
 
   it("disarm switches off immediately and preserves command history", () => {

@@ -5,17 +5,22 @@
  * caller supplies a monotonic clock and drives every transition explicitly,
  * so wall-clock changes are invisible.
  *
+ * Calls with finite timestamps settle elapsed limits before processing
+ * the event. If both limits elapsed, the one reached first determines
+ * whether the action completed normally or needs explicit re-arming.
+ *
  * Admission rule: a command is accepted only while armed, only when the
  * output is off, and only when a heartbeat arrived within the last
- * HEARTBEAT_CUTOFF_MS (2s). A rejected command never changes the output,
- * the deadline, or the remembered command history.
+ * HEARTBEAT_CUTOFF_MS (2s). Rejection never starts or reschedules an action
+ * or records an ID; elapsed limits still take effect.
  *
  * The Pico LED turns off by itself at its deadline (normal completion, stays
  * armed) and within 2s of the last heartbeat. Heartbeat loss means the host
  * may be gone, so that cutoff also disarms: an interrupted action resumes
  * only after an explicit re-arm. A duplicate command, a heartbeat, or a
  * fresh command id can never extend or move a running deadline.
- * Non-finite timestamps fail toward off and are never stored.
+ * Commands reject non-finite times, heartbeats ignore them, and ticks cut
+ * the output. These values are never stored.
  * A new instance starts off and disarmed.
  */
 export const PICO_MAX_ACTIVE_MS = 30_000;
@@ -54,22 +59,22 @@ export function createPicoLed(): ProtectedLed {
     deadlineMs = undefined;
   }
 
-  // Settle any elapsed deadline or heartbeat cutoff at the caller's time.
-  // Duration expiry is normal completion and stays armed; heartbeat loss
-  // interrupts the action, so it also disarms until explicitly re-armed.
+  // Settle the output at the caller's time. Whichever limit was reached
+  // first decides: duration expiry is normal completion and stays armed;
+  // heartbeat loss interrupts the action, so it also disarms until
+  // explicitly re-armed. A tie counts as normal completion.
   function settle(nowMs: number): void {
     if (!on || deadlineMs === undefined) return;
-    if (nowMs >= deadlineMs) {
-      cut();
-      return;
-    }
     if (
       lastHeartbeatMs !== undefined &&
-      nowMs - lastHeartbeatMs >= HEARTBEAT_CUTOFF_MS
+      nowMs - lastHeartbeatMs >= HEARTBEAT_CUTOFF_MS &&
+      lastHeartbeatMs + HEARTBEAT_CUTOFF_MS < deadlineMs
     ) {
       cut();
       armed = false;
+      return;
     }
+    if (nowMs >= deadlineMs) cut();
   }
 
   return {
@@ -89,9 +94,10 @@ export function createPicoLed(): ProtectedLed {
       cut();
     },
     command(id, requestedMs, nowMs) {
-      if (!armed) return { accepted: false, detail: "disarmed" };
       if (!Number.isFinite(nowMs))
         return { accepted: false, detail: "time must be finite" };
+      settle(nowMs);
+      if (!armed) return { accepted: false, detail: "disarmed" };
       const activeMs = requestedMs ?? PICO_DEFAULT_ACTIVE_MS;
       if (
         !Number.isInteger(activeMs) ||
@@ -100,7 +106,6 @@ export function createPicoLed(): ProtectedLed {
       ) {
         return { accepted: false, detail: "duration is outside 1 to 30000 ms" };
       }
-      settle(nowMs);
       if (seen.has(id))
         return {
           accepted: false,
@@ -125,8 +130,9 @@ export function createPicoLed(): ProtectedLed {
       return { accepted: true, detail: "on", activeMs };
     },
     heartbeat(nowMs) {
-      if (!armed) return;
       if (!Number.isFinite(nowMs)) return;
+      settle(nowMs);
+      if (!armed) return;
       lastHeartbeatMs = nowMs;
     },
     tick(nowMs) {

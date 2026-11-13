@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createExecutionService,
   parsePolicy,
@@ -68,6 +68,40 @@ function approve(
   });
   if (!grant.ok) throw new Error(`expected an approval: ${grant.detail}`);
   return grant.token;
+}
+
+const needsOff = { requiresState: { output: "set", equals: false } };
+
+/** The shared policy with extra fields on its `set` and `level` operations. */
+function stateful(
+  set: Record<string, unknown>,
+  level: Record<string, unknown> = {},
+): typeof policy {
+  const copy = structuredClone(policy);
+  Object.assign(copy.devices[0]!.operations[0]!, level);
+  Object.assign(copy.devices[0]!.operations[1]!, set);
+  return copy;
+}
+
+/** The first observation waits for `release`; later ones answer at once. */
+function heldObserver(clock: { now: () => number }): {
+  observe: DeviceObserver;
+  release: (observation: DeviceObservation) => void;
+} {
+  let resolveFirst: (observation: DeviceObservation) => void = () => undefined;
+  let calls = 0;
+  return {
+    observe: () => {
+      calls += 1;
+      if (calls > 1) {
+        return { outputs: { set: false }, atMs: clock.now(), valid: true };
+      }
+      return new Promise<DeviceObservation>((resolve) => {
+        resolveFirst = resolve;
+      });
+    },
+    release: (observation) => resolveFirst(observation),
+  };
 }
 
 describe("execution policy", () => {
@@ -1003,5 +1037,140 @@ describe("execution policy", () => {
         )
       ).detail,
     ).toMatch(/duration/);
+  });
+
+  it("judges freshness and expiry when the observation arrives", async () => {
+    const clock = time(1_000);
+    let readMs = 20;
+    const effect = vi.fn(() => ({ outcome: "confirmed" as const }));
+    const service = createExecutionService(stateful(needsOff, needsOff), {
+      clock: clock.now,
+      effect,
+      // A live read: time passes while it runs, and it is stamped on arrival.
+      observe: () => {
+        clock.set(clock.now() + readMs);
+        return { outputs: { set: false }, atMs: clock.now(), valid: true };
+      },
+      read: () => true,
+    });
+    service.arm();
+    const run = () =>
+      service.execute(
+        request({ approvalToken: approve(service, { ttlMs: 1_000 }) }),
+      );
+    expect((await run()).outcome).toBe("confirmed");
+    expect(
+      await service.execute(
+        request({ operation: "level", payload: null, activeMs: undefined }),
+      ),
+    ).toMatchObject({ outcome: "confirmed", data: true });
+    readMs = 5_000;
+    expect((await run()).detail).toBe("approval has expired");
+    expect(effect).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the actuation rate limit when observations finish out of order", async () => {
+    const clock = time(1_000);
+    const effect = vi.fn(() => ({ outcome: "confirmed" as const }));
+    const held = heldObserver(clock);
+    const service = createExecutionService(
+      stateful({ ...needsOff, maxPerMinute: 1 }),
+      { clock: clock.now, effect, observe: held.observe },
+    );
+    service.arm();
+    const first = approve(service);
+    const second = approve(service);
+    const pending = service.execute(request({ approvalToken: first }));
+    clock.set(1_001);
+    expect(
+      (await service.execute(request({ approvalToken: second }))).outcome,
+    ).toBe("confirmed");
+    held.release({ outputs: { set: false }, atMs: 1_000, valid: true });
+    expect((await pending).detail).toBe("rate limit exceeded");
+    expect(effect).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the read rate limit when observations finish out of order", async () => {
+    const clock = time(1_000);
+    const read = vi.fn(() => true);
+    const held = heldObserver(clock);
+    const service = createExecutionService(
+      stateful({}, { ...needsOff, maxPerMinute: 1 }),
+      { clock: clock.now, observe: held.observe, read },
+    );
+    const level = request({
+      operation: "level",
+      payload: null,
+      activeMs: undefined,
+    });
+    const pending = service.execute(level);
+    clock.set(1_001);
+    expect((await service.execute(level)).outcome).toBe("confirmed");
+    held.release({ outputs: { set: false }, atMs: 1_000, valid: true });
+    expect((await pending).detail).toBe("rate limit exceeded");
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps rate limits across wall-clock steps", async () => {
+    const wallClock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      const limited = structuredClone(policy);
+      Object.assign(limited.devices[0]!.operations[1]!, { maxPerMinute: 1 });
+      const service = createExecutionService(limited, {
+        effect: () => ({ outcome: "confirmed" }),
+      });
+      service.arm();
+      const run = () =>
+        service.execute(request({ approvalToken: approve(service) }));
+      expect((await run()).outcome).toBe("confirmed");
+      wallClock.mockReturnValue(3_601_000);
+      expect((await run()).detail).toMatch(/rate limit exceeded/);
+      wallClock.mockReturnValue(0);
+      expect((await run()).detail).toMatch(/rate limit exceeded/);
+    } finally {
+      wallClock.mockRestore();
+    }
+  });
+
+  it("does not dispatch after disarming during admission", async () => {
+    const effect = vi.fn(() => ({ outcome: "confirmed" as const }));
+    const service = createExecutionService(policy, {
+      clock: time(1_000).now,
+      effect,
+    });
+    service.arm();
+    const action = request({ approvalToken: approve(service) });
+    const pending = service.execute(action);
+    service.disarm();
+    expect(await pending).toMatchObject({
+      outcome: "rejected",
+      detail: "execution service is disarmed",
+    });
+    expect(effect).not.toHaveBeenCalled();
+    service.arm();
+    expect((await service.execute(action)).outcome).toBe("confirmed");
+    expect(effect).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not dispatch after disarming while a state observation is pending", async () => {
+    const clock = time(1_000);
+    const effect = vi.fn(() => ({ outcome: "confirmed" as const }));
+    const held = heldObserver(clock);
+    const service = createExecutionService(stateful(needsOff), {
+      clock: clock.now,
+      effect,
+      observe: held.observe,
+    });
+    service.arm();
+    const pending = service.execute(
+      request({ approvalToken: approve(service) }),
+    );
+    service.disarm();
+    held.release({ outputs: { set: false }, atMs: clock.now(), valid: true });
+    expect(await pending).toMatchObject({
+      outcome: "rejected",
+      detail: "execution service is disarmed",
+    });
+    expect(effect).not.toHaveBeenCalled();
   });
 });

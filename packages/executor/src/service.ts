@@ -59,7 +59,7 @@ export interface ValidatedAction {
 export interface DeviceObservation {
   /** Observed output values by operation name. */
   readonly outputs: Readonly<Record<string, boolean | number>>;
-  /** Service-clock time of the observation. */
+  /** Observation time on the service clock: options.clock, or performance.now() in this process; not wall time. */
   readonly atMs: number;
   readonly valid: boolean;
 }
@@ -136,7 +136,7 @@ export function createExecutionService(
   }
   const policy = parsed.policy;
   const mode = options.mode ?? "development";
-  const clock = options.clock ?? Date.now;
+  const clock = options.clock ?? (() => performance.now());
   const maxObservationAgeMs = options.maxObservationAgeMs ?? 5_000;
   if (
     !Number.isFinite(maxObservationAgeMs) ||
@@ -198,7 +198,6 @@ export function createExecutionService(
   async function checkState(
     deviceId: string,
     operation: PolicyOperation,
-    current: number,
   ): Promise<ExecutionResult | undefined> {
     const required = operation.requiresState;
     if (!required) return undefined;
@@ -211,6 +210,8 @@ export function createExecutionService(
     } catch {
       return rejected("device state is unknown");
     }
+    const current = now();
+    if (current === undefined) return rejected(clockDetail());
     if (
       !isRecord(observation as unknown) ||
       typeof observation.valid !== "boolean" ||
@@ -326,10 +327,10 @@ export function createExecutionService(
         if (request.activeMs !== undefined) {
           return rejected("active duration does not apply to reads");
         }
+        const blocked = await checkState(request.deviceId, operation);
+        if (blocked) return blocked;
         const current = now();
         if (current === undefined) return rejected(clockDetail());
-        const blocked = await checkState(request.deviceId, operation, current);
-        if (blocked) return blocked;
         const limit = operation.maxPerMinute;
         const key = rateKey(request.deviceId, request.operation);
         if (limit !== undefined && recentCount(key, current) >= limit) {
@@ -363,11 +364,11 @@ export function createExecutionService(
       if (!duration.ok) {
         return rejected(duration.detail);
       }
+      const blocked = await checkState(request.deviceId, operation);
+      if (blocked) return blocked;
       const current = now();
       if (current === undefined) return rejected(clockDetail());
       sweepApprovals(current, false);
-      const blocked = await checkState(request.deviceId, operation, current);
-      if (blocked) return blocked;
       if (!effect) {
         return {
           outcome: "failed",
@@ -403,6 +404,7 @@ export function createExecutionService(
       if (limit !== undefined && recentCount(key, current) >= limit) {
         return rejected("rate limit exceeded");
       }
+      if (!armed) return rejected("execution service is disarmed");
       approval.used = true;
       if (limit !== undefined) recordStamp(key, current);
       const action: ValidatedAction = {

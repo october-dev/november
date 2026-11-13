@@ -431,6 +431,41 @@ describe("serial frames", () => {
     link.close();
   });
 
+  it("never lets a reply from an earlier session settle a command on a new link", async () => {
+    const earlier = linkedPipes();
+    simulatedBoard(earlier.board, { identity: IDENTITY });
+    const old = mustLink(
+      await openSerialLink(earlier.host, {
+        identity: IDENTITY,
+        helloTimeoutMs: 40,
+      }),
+    );
+    expect(await old.command("a", "set", true, 20)).toMatchObject({
+      outcome: "unknown",
+    });
+    const staleWireId = decodeFrame(earlier.hostWrites[1] as Buffer).id;
+    old.close();
+
+    const { host, board, hostWrites, deliverToHost } = linkedPipes();
+    simulatedBoard(board, { identity: IDENTITY });
+    const link = mustLink(
+      await openSerialLink(host, { identity: IDENTITY, helloTimeoutMs: 40 }),
+    );
+    const pending = link.command("b", "set", false, 500);
+    const wireId = decodeFrame(hostWrites[1] as Buffer).id;
+    expect(wireId).not.toBe(staleWireId);
+    deliverToHost(encodeFrame(confirmedResult(staleWireId)));
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(settled).toBe(false);
+    deliverToHost(encodeFrame(confirmedResult(wireId)));
+    expect(await pending).toMatchObject({ outcome: "confirmed" });
+    link.close();
+  });
+
   it("does not write a command again when the reply is missing", async () => {
     const { host, board } = linkedPipes();
     simulatedBoard(board, { identity: IDENTITY });
@@ -510,6 +545,40 @@ describe("serial frames", () => {
     });
     expect(mustResult(oversize).outcome).toBe("rejected");
     expect(helloClosed).toBe(1);
+  });
+
+  it("closes the pipe when open is refused before the handshake", async () => {
+    const refusals = [
+      { identity: "", helloTimeoutMs: 20 },
+      { identity: IDENTITY, helloTimeoutMs: Number.NaN },
+    ];
+    for (const options of refusals) {
+      const { host } = linkedPipes();
+      let closed = 0;
+      host.close = () => {
+        closed += 1;
+      };
+      expect(mustResult(await openSerialLink(host, options)).outcome).toBe(
+        "rejected",
+      );
+      expect(closed).toBe(1);
+    }
+    let closed = 0;
+    const deaf: BytePipe = {
+      write() {
+        return undefined;
+      },
+      onData() {
+        throw new Error("listener failed");
+      },
+      close() {
+        closed += 1;
+      },
+    };
+    expect(
+      mustResult(await openSerialLink(deaf, { identity: IDENTITY })).outcome,
+    ).toBe("rejected");
+    expect(closed).toBe(1);
   });
 
   it("treats a partial command write as a terminal link failure", async () => {

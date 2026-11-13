@@ -13,11 +13,12 @@
  * malformed bodies are reported and ignored; they never clear pending
  * work. Only validated result messages settle commands.
  *
- * Each command goes on the wire under a fresh link-issued id, so a late
- * reply for a retired request can never confirm a newer operation that
- * reuses the caller's id. Reusing a caller's id while it is still in
- * flight is rejected. Durable command identity and replay rules belong to
- * the action journal (#10), not to this transport.
+ * Each command goes on the wire under a fresh link-issued id that starts
+ * with this open's challenge, so a late reply from this session or an
+ * earlier one can never confirm a newer operation, even one that reuses
+ * the caller's id. Reusing a caller's id while it is still in flight is
+ * rejected. Durable command identity and replay rules belong to the
+ * action journal (#10), not to this transport.
  *
  * Refusals before any byte leaves (closed link, invalid input, oversize
  * frame) are rejected; only failures where bytes may have left are
@@ -148,9 +149,11 @@ export async function openSerialLink(
     helloTimeoutMs < 1 ||
     helloTimeoutMs > MAX_TIMEOUT_MS
   ) {
+    closeQuietly(pipe);
     return rejected("invalid hello timeout");
   }
   if (typeof options.identity !== "string" || options.identity.length === 0) {
+    closeQuietly(pipe);
     return rejected("board identity is required");
   }
   const challenge = randomBytes(16).toString("hex");
@@ -241,6 +244,7 @@ export async function openSerialLink(
   try {
     pipe.onData((chunk) => parser.push(chunk));
   } catch {
+    closeQuietly(pipe);
     return rejected("port listener failed");
   }
   const helloSettled = new Promise<boolean>((resolve) => {
@@ -319,7 +323,7 @@ export async function openSerialLink(
         return Promise.resolve(rejected("invalid command timeout"));
       }
       if (dead) return Promise.resolve(rejected(deadDetail));
-      const wireId = String(nextWire);
+      const wireId = `${challenge}:${nextWire}`;
       let frame: Buffer;
       try {
         frame = encodeFrame({

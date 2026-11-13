@@ -29,26 +29,29 @@ static void turn_off(NovemberLed *led) {
   led->active_ms = 0;
 }
 
-/* Settle any elapsed duration or heartbeat cutoff at the caller's time.
- * Unsigned elapsed comparison keeps this correct across the 32-bit wrap.
- * Duration expiry is normal completion and stays armed; heartbeat loss
- * interrupts the action, so it also disarms until explicitly re-armed.
- * An expired heartbeat is forgotten even while off, so a full counter
- * wrap cannot make it look fresh again. */
+/* Settle the output at the caller's time. Whichever limit was reached
+ * first decides: duration expiry is normal completion and stays armed;
+ * heartbeat loss interrupts the action, so it also disarms until
+ * explicitly re-armed. A tie counts as normal completion. Unsigned
+ * arithmetic keeps this correct across the 32-bit wrap. An expired
+ * heartbeat is forgotten even while off, so a full counter wrap cannot
+ * make it look fresh again. */
 static void settle(NovemberLed *led, uint32_t now_ms) {
   bool heartbeat_expired =
       led->have_heartbeat &&
       now_ms - led->last_heartbeat_ms >= NOVEMBER_HEARTBEAT_CUTOFF_MS;
   if (heartbeat_expired) led->have_heartbeat = false;
   if (!led->on) return;
-  if (now_ms - led->start_ms >= led->active_ms) {
-    turn_off(led);
-    return;
-  }
-  if (heartbeat_expired) {
+  /* While on, the last heartbeat is at most 1999 ms before the start, so
+   * the offset from the start to the heartbeat limit is small and exact. */
+  if (heartbeat_expired &&
+      led->last_heartbeat_ms + NOVEMBER_HEARTBEAT_CUTOFF_MS - led->start_ms <
+          led->active_ms) {
     turn_off(led);
     led->armed = false;
+    return;
   }
+  if (now_ms - led->start_ms >= led->active_ms) turn_off(led);
 }
 
 void november_led_init(NovemberLed *led, uint32_t boot_id) {
@@ -71,9 +74,9 @@ int november_led_command(NovemberLed *led, const char *id, uint32_t requested_ms
                          uint32_t now_ms) {
   uint32_t active =
       requested_ms == 0 ? NOVEMBER_PICO_DEFAULT_ACTIVE_MS : requested_ms;
+  settle(led, now_ms);
   if (!led->armed || !id_valid(id)) return 0;
   if (active > NOVEMBER_PICO_MAX_ACTIVE_MS) return 0;
-  settle(led, now_ms);
   if (seen(led, id)) return 0;
   if (led->on) return 0;
   if (!led->have_heartbeat ||
@@ -89,6 +92,7 @@ int november_led_command(NovemberLed *led, const char *id, uint32_t requested_ms
 }
 
 void november_led_heartbeat(NovemberLed *led, uint32_t now_ms) {
+  settle(led, now_ms);
   if (!led->armed) return;
   led->last_heartbeat_ms = now_ms;
   led->have_heartbeat = true;

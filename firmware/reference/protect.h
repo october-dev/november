@@ -13,19 +13,21 @@
  *
  * Time contract: the caller supplies a monotonic millisecond clock modulo
  * 2^32 and drives every transition by calling tick/heartbeat/command in
- * event order. Duration expiry compares unsigned elapsed time against the
- * stored duration, so it is correct across the 32-bit wrap as long as time
- * only moves forward. Ticks must run often enough to observe the cutoff;
- * this model schedules nothing by itself. A tick that sees the last
- * heartbeat expired forgets it, even while the output is off and without
- * disarming; only another heartbeat makes admission possible again, so a
- * full counter wrap cannot revive an old one.
+ * event order. Every call settles elapsed limits before it processes its
+ * own event; if both limits elapsed, the one reached first decides whether
+ * the action completed normally or needs an explicit re-arm. Unsigned
+ * arithmetic keeps this correct across the 32-bit wrap as long as time
+ * only moves forward. Ticks must still run often enough to switch the
+ * output off on time; this model schedules nothing by itself. A call that
+ * sees the last heartbeat expired forgets it; while the output is off that
+ * does not disarm. Only another heartbeat makes admission possible again,
+ * so a full counter wrap cannot revive an old one.
  *
  * Admission rule: a command returns 1 only while armed, only when the
  * output is off, only with a valid ID the history can retain, and only
  * when a heartbeat arrived less than NOVEMBER_HEARTBEAT_CUTOFF_MS ago.
- * A refused command (return 0) never changes the output, the activation,
- * or the remembered IDs.
+ * A refused command (return 0) never starts or moves an activation and
+ * never records an ID; elapsed limits still take effect.
  *
  * The LED turns off by itself when its duration elapses (normal completion,
  * stays armed) and within 2s of the last heartbeat. Heartbeat loss means

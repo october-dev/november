@@ -87,10 +87,10 @@ int main(void) {
   november_led_heartbeat(&fresh, 0);
   expect(november_led_command(&fresh, "a", 30000, 0) == 1,
          "overlap scenario starts on");
-  november_led_heartbeat(&fresh, 5000);
-  expect(november_led_command(&fresh, "c", 1000, 5000) == 0,
+  november_led_heartbeat(&fresh, 1000);
+  expect(november_led_command(&fresh, "c", 1000, 1000) == 0,
          "shorter overlap refused");
-  for (t = 6000; t <= 29000; t += 1000) {
+  for (t = 2000; t <= 29000; t += 1000) {
     november_led_heartbeat(&fresh, t);
     november_led_tick(&fresh, t);
   }
@@ -304,6 +304,31 @@ int main(void) {
     expect(november_led_command(&fresh, "idle-wrap", 1000, 100) == 1,
            "a real new heartbeat restores idle admission");
     expect(fresh.on, "fresh heartbeat permits activation");
+  }
+
+  /* Late events settle first; the limit reached first decides re-arming. */
+  {
+    static const uint32_t durations[3] = {1000u, 2000u, 3000u};
+    for (i = 0; i < 9; i += 1) {
+      const uint32_t active = durations[i / 3];
+      november_led_init(&fresh, 18);
+      november_led_arm(&fresh);
+      november_led_heartbeat(&fresh, 0);
+      expect(november_led_command(&fresh, "a", active, 0) == 1,
+             "late-event case accepted");
+      expect(fresh.on, "late-event case on");
+      if (i % 3 == 0) {
+        november_led_heartbeat(&fresh, 3500);
+      } else if (i % 3 == 1) {
+        november_led_tick(&fresh, 3500);
+      } else {
+        expect(november_led_command(&fresh, "bad", 30001, 3500) == 0,
+               "late over-max command refused");
+      }
+      expect(!fresh.on, "late event settles the output off");
+      expect(fresh.armed == (active <= 2000u),
+             "the limit reached first decides re-arming");
+    }
   }
 
   november_led_init(&restarted, led.boot_id + 1);

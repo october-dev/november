@@ -43,12 +43,12 @@ export { JournalError, openJournal } from "./journal.js";
 export type {
   ActionJournal,
   CrashPoint,
-  EffectOutcome,
   JournalCommand,
   JournalEffect,
   JournalRecordView,
   JournalResult,
 } from "./journal.js";
+// EffectOutcome is exported once, below, from service.ts; journal.ts declares the identical shape.
 
 export function executorStatus(): ExecutorStatus {
   return {

@@ -1,4 +1,8 @@
 packages:
   - "packages/*"
 allowBuilds:
+  # Transitive SDK build scripts. The agent adapter does not import these
+  # packages; their lifecycle scripts stay disabled.
+  "@google/genai": false
   esbuild: true
+  protobufjs: false

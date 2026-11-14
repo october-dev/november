@@ -106,7 +106,7 @@ Things like pumps, motors and mains-powered devices show why the safety rules ma
 - **Two front doors.** You reach November from a terminal while you build, or it runs as a background service on the device. Both use the same core.
 - **The agent asks; November decides.** The agent never touches the hardware directly. It sends a request. A separate process checks it against the rules and then carries it out.
 - **Hardware is reached through adapters.** Small pieces of code that know how to speak serial, GPIO, I2C, SPI or MQTT. Simulated versions let you test without real parts.
-- **Reuse, don't reinvent.** November plans to reuse an existing agent loop (the part that runs the conversation with the model) rather than write its own. The first candidate is the core of the Pi agent project. November itself adds the device tools, permissions, action logs and recovery.
+- **Reuse, don't reinvent.** November reuses the Pi agent project's loop and model transport (the parts that run the conversation with the model) rather than writing its own. November itself adds the device tools, permissions, action logs and recovery.
 - **Shipped devices stay lean.** They do not need the coding interface or the development permissions.
 
 ## Supported hardware
@@ -182,12 +182,12 @@ For the full details, see the [threat model](docs/threat-model.md) and the [safe
 - The list of action results is fixed: `rejected`, `queued`, `dispatched`, `confirmed`, `failed`, `cancelled-before-dispatch` and `unknown`.
 - Observations, actions, and the adapter lifecycle have a shared contract. A simulated adapter passes it. Discovery and configuration checks do not actuate anything. The versioned device configuration schema is a separate change.
 - Design documents: [support matrix](docs/support-matrix.md), [release gates](docs/release-gates.md) and [threat model](docs/threat-model.md).
+- The agent loop can talk to a hosted model, a local model, or a fake model used in tests. It still cannot touch hardware itself. Every device request is handed to a separate execution service.
 
 **Coming next**
 
 - Real adapters for serial, GPIO, I2C, SPI and MQTT.
 - The permission checks, the action log and recovery after crashes.
-- Connecting the agent loop to a hosted model and a local model.
 - A fuller set of `november` commands.
 - The background service for Linux, and a way to install and update it.
 
@@ -249,6 +249,7 @@ node packages/cli/dist/index.js doctor
 | Package | What it does |
 | --- | --- |
 | [`packages/core`](packages/core) | Shared definitions used everywhere. No hardware or model code. |
+| [`packages/agent`](packages/agent) | Agent loop and model providers. No hardware access. |
 | [`packages/executor`](packages/executor) | The trusted part that actually runs device actions, kept separate from the AI model. |
 | [`packages/adapters`](packages/adapters) | Code for serial, GPIO, I2C, SPI and MQTT, plus simulated devices. |
 | [`packages/cli`](packages/cli) | The `november` terminal tool for development. |

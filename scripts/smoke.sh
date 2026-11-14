@@ -15,11 +15,16 @@ echo "== smoke: package entry points load"
 node -e '
 Promise.all([
   import("./packages/core/dist/index.js"),
+  import("./packages/agent/dist/index.js"),
   import("./packages/adapters/dist/index.js"),
   import("./packages/executor/dist/index.js"),
   import("./packages/service/dist/index.js"),
-]).then(([core, adapters, executor, service]) => {
+]).then(([core, agent, adapters, executor, service]) => {
   if (!Array.isArray(core.ACTION_OUTCOMES)) throw new Error("core export missing");
+  if (agent.AGENT_LIMITS.maxTurns < 1) throw new Error("agent limits missing");
+  if (agent.AGENT_LOOP_LIBRARY.name !== "@earendil-works/pi-agent-core") {
+    throw new Error("agent loop library missing");
+  }
   if (adapters.listSimulatedDevices().length === 0) throw new Error("no simulated devices");
   if (executor.executorStatus().armed !== false) throw new Error("executor must start disarmed");
   if (service.serviceHealth().name !== "november") throw new Error("service export missing");

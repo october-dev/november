@@ -563,6 +563,19 @@ describe("serial frames", () => {
       );
       expect(closed).toBe(1);
     }
+    const missing = linkedPipes();
+    let missingClosed = 0;
+    missing.host.close = () => {
+      missingClosed += 1;
+    };
+    expect(
+      mustResult(
+        await openSerialLink(missing.host, {
+          identity: IDENTITY,
+        } as Parameters<typeof openSerialLink>[1]),
+      ),
+    ).toMatchObject({ outcome: "rejected", detail: "invalid hello timeout" });
+    expect(missingClosed).toBe(1);
     let closed = 0;
     const deaf: BytePipe = {
       write() {
@@ -576,7 +589,9 @@ describe("serial frames", () => {
       },
     };
     expect(
-      mustResult(await openSerialLink(deaf, { identity: IDENTITY })).outcome,
+      mustResult(
+        await openSerialLink(deaf, { identity: IDENTITY, helloTimeoutMs: 20 }),
+      ).outcome,
     ).toBe("rejected");
     expect(closed).toBe(1);
   });

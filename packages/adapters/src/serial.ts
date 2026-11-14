@@ -22,7 +22,9 @@
  *
  * Refusals before any byte leaves (closed link, invalid input, oversize
  * frame) are rejected; only failures where bytes may have left are
- * unknown. Timeouts are caller-supplied milliseconds.
+ * unknown. Hello and command timeouts are caller-supplied milliseconds
+ * with no default; the integrating adapter chooses them against the
+ * release-gate budgets (docs/release-gates.md).
  *
  * The 1024-byte JSON limit bounds one frame, not all link memory: chunk
  * sizes and outstanding-command counts still need transport bounds at
@@ -30,6 +32,7 @@
  * reference-firmware verification remain outstanding (#12).
  */
 import { randomBytes } from "node:crypto";
+import type { AdapterOutcomeValue } from "@november/core";
 
 export const SERIAL_VERSION = 1;
 export const MAX_FRAME_BYTES = 1024;
@@ -53,7 +56,7 @@ export interface BytePipe {
 }
 
 export interface SerialResult {
-  readonly outcome: "confirmed" | "failed" | "unknown" | "rejected";
+  readonly outcome: AdapterOutcomeValue;
   readonly detail: string;
 }
 
@@ -139,11 +142,11 @@ export async function openSerialLink(
   pipe: BytePipe,
   options: {
     readonly identity: string;
-    readonly helloTimeoutMs?: number;
+    readonly helloTimeoutMs: number;
     readonly onFrameError?: (detail: string) => void;
   },
 ): Promise<SerialLink | SerialResult> {
-  const helloTimeoutMs = options.helloTimeoutMs ?? 50;
+  const helloTimeoutMs = options.helloTimeoutMs;
   if (
     !Number.isFinite(helloTimeoutMs) ||
     helloTimeoutMs < 1 ||

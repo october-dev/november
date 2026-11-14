@@ -6,8 +6,9 @@
  * journal (#10), and ownership/serialization rules (#11). Adapters are
  * loaded here, never in the agent process.
  *
- * The policy engine checks every request here. The dispatch path and
- * journal stay with their own issues.
+ * The policy engine checks every request here, and the action journal
+ * records outcomes before and after dispatch. Ownership rules stay with
+ * their own issue.
  */
 import type { ActionOutcome } from "@november/core";
 
@@ -38,6 +39,16 @@ export type {
   SecretResult,
   SecretStore,
 } from "./secrets.js";
+export { JournalError, openJournal } from "./journal.js";
+export type {
+  ActionJournal,
+  CrashPoint,
+  JournalCommand,
+  JournalEffect,
+  JournalRecordView,
+  JournalResult,
+} from "./journal.js";
+// EffectOutcome is exported once, below, from service.ts; journal.ts declares the identical shape.
 
 export function executorStatus(): ExecutorStatus {
   return {

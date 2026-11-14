@@ -8,3 +8,5 @@
  */
 export { listSimulatedDevices } from "./simulated.js";
 export type { SimulatedDevice } from "./simulated.js";
+export { createSimulatedAdapter } from "./simulated-adapter.js";
+export type { SimulatedAdapter } from "./simulated-adapter.js";

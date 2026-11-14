@@ -25,6 +25,20 @@ export interface ExecutorStatus {
 /** Outcome a not-yet-implemented executor must report: never a fake success. */
 export const UNIMPLEMENTED_OUTCOME: ActionOutcome = "rejected";
 
+export {
+  checkEndpoint,
+  createSecretStore,
+  parseSecretRef,
+  redactSecrets,
+} from "./secrets.js";
+export type {
+  SecretPurpose,
+  SecretRecord,
+  SecretRef,
+  SecretResult,
+  SecretStore,
+} from "./secrets.js";
+
 export function executorStatus(): ExecutorStatus {
   return {
     ready: false,

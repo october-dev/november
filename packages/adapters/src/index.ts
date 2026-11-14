@@ -20,3 +20,5 @@ export type {
   RigOptions,
   RigResult,
 } from "./rig.js";
+export { createSimulatedAdapter } from "./simulated-adapter.js";
+export type { SimulatedAdapter } from "./simulated-adapter.js";

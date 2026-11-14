@@ -1,0 +1,8 @@
+{
+  "commandId": "cmd-led-off",
+  "deviceId": "host-led",
+  "operation": "set",
+  "payload": false,
+  "deadlineMs": 2000,
+  "expectedState": false
+}

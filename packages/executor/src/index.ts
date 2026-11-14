@@ -25,6 +25,15 @@ export interface ExecutorStatus {
 /** Outcome a not-yet-implemented executor must report: never a fake success. */
 export const UNIMPLEMENTED_OUTCOME: ActionOutcome = "rejected";
 
+export { createResourceGate } from "./gate.js";
+export type {
+  GateAccepted,
+  GateKind,
+  GateRejected,
+  GateResult,
+  PolicyDecision,
+  ResourceGate,
+} from "./gate.js";
 export {
   checkEndpoint,
   createSecretStore,

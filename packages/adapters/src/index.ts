@@ -16,3 +16,5 @@ export {
   createPicoLed,
 } from "./watchdog.js";
 export type { CommandResult, ProtectedLed } from "./watchdog.js";
+export { createSimulatedAdapter } from "./simulated-adapter.js";
+export type { SimulatedAdapter } from "./simulated-adapter.js";

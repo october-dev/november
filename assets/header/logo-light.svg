@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="731" height="140" viewBox="0 0 731 140" role="img" aria-label="november">
+  <style>
+    .led { animation: blink 1.4s steps(1) infinite; }
+    @keyframes blink { 50% { fill-opacity: .25; } }
+    .pin { animation: pulse 1.8s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+  </style>
+  <g shape-rendering="crispEdges">
+    <rect x="50" y="35" width="10" height="10" fill="#C2410C"/>
+    <rect x="60" y="35" width="10" height="10" fill="#C2410C"/>
+    <rect x="70" y="35" width="10" height="10" fill="#C2410C"/>
+    <rect x="80" y="35" width="10" height="10" fill="#C2410C"/>
+    <rect x="90" y="35" width="10" height="10" fill="#C2410C"/>
+    <rect x="100" y="35" width="10" height="10" fill="#C2410C"/>
+    <rect x="110" y="35" width="10" height="10" fill="#C2410C"/>
+    <rect x="120" y="35" width="10" height="10" fill="#C2410C"/>
+    <rect x="50" y="45" width="10" height="10" fill="#C2410C"/>
+    <rect x="60" y="45" width="10" height="10" fill="#F97316"/>
+    <rect x="70" y="45" width="10" height="10" fill="#F97316"/>
+    <rect x="80" y="45" width="10" height="10" fill="#F97316"/>
+    <rect x="90" y="45" width="10" height="10" fill="#F97316"/>
+    <rect x="100" y="45" width="10" height="10" fill="#F97316"/>
+    <rect x="110" y="45" width="10" height="10" fill="#F97316"/>
+    <rect x="120" y="45" width="10" height="10" fill="#C2410C"/>
+    <rect x="50" y="55" width="10" height="10" fill="#C2410C"/>
+    <rect x="60" y="55" width="10" height="10" fill="#F97316"/>
+    <rect x="70" y="55" width="10" height="10" fill="#F97316"/>
+    <rect x="80" y="55" width="10" height="10" fill="#F97316"/>
+    <rect x="90" y="55" width="10" height="10" fill="#F97316"/>
+    <rect x="100" y="55" width="10" height="10" fill="#F97316"/>
+    <rect x="110" y="55" width="10" height="10" fill="#F97316"/>
+    <rect x="120" y="55" width="10" height="10" fill="#C2410C"/>
+    <rect x="50" y="65" width="10" height="10" fill="#C2410C"/>
+    <rect x="60" y="65" width="10" height="10" fill="#F97316"/>
+    <rect x="70" y="65" width="10" height="10" fill="#F97316"/>
+    <rect x="80" y="65" width="10" height="10" fill="#F97316"/>
+    <rect x="90" y="65" width="10" height="10" fill="#F97316"/>
+    <rect x="100" y="65" width="10" height="10" fill="#F97316"/>
+    <rect x="110" y="65" width="10" height="10" fill="#F97316"/>
+    <rect x="120" y="65" width="10" height="10" fill="#C2410C"/>
+    <rect x="50" y="75" width="10" height="10" fill="#C2410C"/>
+    <rect x="60" y="75" width="10" height="10" fill="#F97316"/>
+    <rect x="70" y="75" width="10" height="10" fill="#F97316"/>
+    <rect x="80" y="75" width="10" height="10" fill="#F97316"/>
+    <rect x="90" y="75" width="10" height="10" fill="#F97316"/>
+    <rect x="100" y="75" width="10" height="10" fill="#F97316"/>
+    <rect x="110" y="75" width="10" height="10" fill="#F97316"/>
+    <rect x="120" y="75" width="10" height="10" fill="#C2410C"/>
+    <rect x="50" y="85" width="10" height="10" fill="#C2410C"/>
+    <rect x="60" y="85" width="10" height="10" fill="#F97316"/>
+    <rect x="70" y="85" width="10" height="10" fill="#F97316"/>
+    <rect x="80" y="85" width="10" height="10" fill="#F97316"/>
+    <rect x="90" y="85" width="10" height="10" fill="#F97316"/>
+    <rect x="100" y="85" width="10" height="10" fill="#F97316"/>
+    <rect x="110" y="85" width="10" height="10" fill="#F97316"/>
+    <rect x="120" y="85" width="10" height="10" fill="#C2410C"/>
+    <rect x="50" y="95" width="10" height="10" fill="#C2410C"/>
+    <rect x="60" y="95" width="10" height="10" fill="#F97316"/>
+    <rect x="70" y="95" width="10" height="10" fill="#F97316"/>
+    <rect x="80" y="95" width="10" height="10" fill="#F97316"/>
+    <rect x="90" y="95" width="10" height="10" fill="#F97316"/>
+    <rect x="100" y="95" width="10" height="10" fill="#F97316"/>
+    <rect x="110" y="95" width="10" height="10" fill="#F97316"/>
+    <rect x="120" y="95" width="10" height="10" fill="#C2410C"/>
+    <rect x="50" y="105" width="10" height="10" fill="#C2410C"/>
+    <rect x="60" y="105" width="10" height="10" fill="#C2410C"/>
+    <rect x="70" y="105" width="10" height="10" fill="#C2410C"/>
+    <rect x="80" y="105" width="10" height="10" fill="#C2410C"/>
+    <rect x="90" y="105" width="10" height="10" fill="#C2410C"/>
+    <rect x="100" y="105" width="10" height="10" fill="#C2410C"/>
+    <rect x="110" y="105" width="10" height="10" fill="#C2410C"/>
+    <rect x="120" y="105" width="10" height="10" fill="#C2410C"/>
+    <rect class="pin" style="animation-delay:0.0s" x="30" y="45" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.0s" x="40" y="45" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.0s" x="130" y="45" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.0s" x="140" y="45" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.3s" x="30" y="65" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.3s" x="40" y="65" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.3s" x="130" y="65" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.3s" x="140" y="65" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.6s" x="30" y="95" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.6s" x="40" y="95" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.6s" x="130" y="95" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.6s" x="140" y="95" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.9s" x="60" y="15" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.9s" x="60" y="25" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.9s" x="60" y="115" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:0.9s" x="60" y="125" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:1.2s" x="80" y="15" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:1.2s" x="80" y="25" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:1.2s" x="80" y="115" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:1.2s" x="80" y="125" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:1.5s" x="110" y="15" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:1.5s" x="110" y="25" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:1.5s" x="110" y="115" width="10" height="10" fill="#7C2D12"/>
+    <rect class="pin" style="animation-delay:1.5s" x="110" y="125" width="10" height="10" fill="#7C2D12"/>
+    <rect class="led" x="80" y="65" width="10" height="10" fill="#FDE68A"/>
+    <rect class="led" x="90" y="65" width="10" height="10" fill="#FDE68A"/>
+    <rect class="led" x="80" y="75" width="10" height="10" fill="#FDE68A"/>
+    <rect class="led" x="90" y="75" width="10" height="10" fill="#FDE68A"/>
+  </g>
+  <text x="200" y="106" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="96" font-weight="800" letter-spacing="-3" fill="#111111">november</text>
+</svg>

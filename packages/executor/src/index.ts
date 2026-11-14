@@ -6,8 +6,9 @@
  * journal (#10), and ownership/serialization rules (#11). Adapters are
  * loaded here, never in the agent process.
  *
- * Scaffold only: the dispatch path, journal, and policy engine are
- * implemented by their owning issues.
+ * The policy engine checks every request here, and the action journal
+ * records outcomes before and after dispatch. Ownership rules stay with
+ * their own issue.
  */
 import type { ActionOutcome } from "@november/core";
 
@@ -25,6 +26,30 @@ export interface ExecutorStatus {
 /** Outcome a not-yet-implemented executor must report: never a fake success. */
 export const UNIMPLEMENTED_OUTCOME: ActionOutcome = "rejected";
 
+export {
+  checkEndpoint,
+  createSecretStore,
+  parseSecretRef,
+  redactSecrets,
+} from "./secrets.js";
+export type {
+  SecretPurpose,
+  SecretRecord,
+  SecretRef,
+  SecretResult,
+  SecretStore,
+} from "./secrets.js";
+export { JournalError, openJournal } from "./journal.js";
+export type {
+  ActionJournal,
+  CrashPoint,
+  JournalCommand,
+  JournalEffect,
+  JournalRecordView,
+  JournalResult,
+} from "./journal.js";
+// EffectOutcome is exported once, below, from service.ts; journal.ts declares the identical shape.
+
 export function executorStatus(): ExecutorStatus {
   return {
     ready: false,
@@ -32,3 +57,25 @@ export function executorStatus(): ExecutorStatus {
     protocolVersion: EXECUTOR_PROTOCOL_VERSION,
   };
 }
+
+export { parsePolicy } from "./policy.js";
+export type {
+  PolicyDevice,
+  PolicyDocument,
+  PolicyOperation,
+  StateRequirement,
+} from "./policy.js";
+export { createExecutionService } from "./service.js";
+export type {
+  ApprovalResult,
+  DeviceObservation,
+  DeviceObserver,
+  DeviceReader,
+  EffectOutcome,
+  ExecutionEffect,
+  ExecutionRequest,
+  ExecutionResult,
+  ExecutionService,
+  ServiceMode,
+  ValidatedAction,
+} from "./service.js";

@@ -1,0 +1,17 @@
+{
+  "configured": {
+    "kind": "serial",
+    "key": "usb-serial:ABC123",
+    "path": "/dev/ttyACM0"
+  },
+  "replugged": {
+    "kind": "serial",
+    "key": "usb-serial:ABC123",
+    "path": "/dev/ttyACM1"
+  },
+  "replaced": {
+    "kind": "serial",
+    "key": "usb-serial:OTHER",
+    "path": "/dev/ttyACM0"
+  }
+}
